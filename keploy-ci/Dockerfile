@@ -34,40 +34,39 @@ ENV CGO_ENABLED=1
 
 # Helper to start dockerd inside the step container
 # Supports optional DOCKERD_FLAGS env (e.g. "--registry-mirror=http://x:5000")
-RUN cat >/usr/local/bin/start-docker <<'EOF' \
-#!/usr/bin/env sh
-set -eu
-
-# Make sure runtime dirs exist
-mkdir -p /var/run /var/lib/docker
-
-# If already running, do nothing
-if docker info >/dev/null 2>&1; then
-  echo "Docker daemon already running"
-  exit 0
-fi
-
-# Default flags
-FLAGS="${DOCKERD_FLAGS:-}"
-
-# Start dockerd in background
-echo "Starting dockerd ${FLAGS} ..."
-dockerd ${FLAGS} >/var/log/dockerd.log 2>&1 &
-
-# Wait until it's ready
-for i in $(seq 1 60); do
-  if docker info >/dev/null 2>&1; then
-    echo "Docker daemon is ready"
-    exit 0
-  fi
-  sleep 1
-done
-
-echo "Docker daemon failed to start"
-tail -n 200 /var/log/dockerd.log || true
-exit 1
-EOF
-RUN chmod +x /usr/local/bin/start-docker
+RUN printf '%s\n' '#!/usr/bin/env sh' \
+  'set -eu' \
+  '' \
+  '# Make sure runtime dirs exist' \
+  'mkdir -p /var/run /var/lib/docker' \
+  '' \
+  '# If already running, do nothing' \
+  'if docker info >/dev/null 2>&1; then' \
+  '  echo "Docker daemon already running"' \
+  '  exit 0' \
+  'fi' \
+  '' \
+  '# Default flags' \
+  'FLAGS="${DOCKERD_FLAGS:-}"' \
+  '' \
+  '# Start dockerd in background' \
+  'echo "Starting dockerd ${FLAGS} ..."' \
+  'dockerd ${FLAGS} >/var/log/dockerd.log 2>&1 &' \
+  '' \
+  '# Wait until it is ready' \
+  'for i in $(seq 1 60); do' \
+  '  if docker info >/dev/null 2>&1; then' \
+  '    echo "Docker daemon is ready"' \
+  '    exit 0' \
+  '  fi' \
+  '  sleep 1' \
+  'done' \
+  '' \
+  'echo "Docker daemon failed to start"' \
+  'tail -n 200 /var/log/dockerd.log || true' \
+  'exit 1' \
+  > /usr/local/bin/start-docker \
+  && chmod +x /usr/local/bin/start-docker
 
 # Default shell for CI
 SHELL ["/bin/sh", "-lc"]
