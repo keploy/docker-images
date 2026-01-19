@@ -3,8 +3,8 @@
 FROM debian:trixie-slim
 
 ARG GO_VERSION=1.25.0
-# Keep Docker "major.minor" aligned with the original docker:26.1-dind base
-ARG DOCKER_MAJOR_MINOR=26.1
+# Keep Docker "major.minor" aligned with the latest stable version
+ARG DOCKER_MAJOR_MINOR=29.1
 
 # Common CI utilities + build deps for CGO builds
 RUN set -eux; \
