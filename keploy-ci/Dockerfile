@@ -1,6 +1,6 @@
 # keploy-ci: Go + Docker daemon + common CI deps (Debian-based)
 # Base includes: dockerd, docker CLI, buildx, containerd, runc
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ARG GO_VERSION=1.25.0
 # Keep Docker "major.minor" aligned with the original docker:26.1-dind base
