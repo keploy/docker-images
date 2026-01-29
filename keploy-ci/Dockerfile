@@ -33,9 +33,7 @@ RUN set -eux; \
     # Additional packages used in CI pipelines
     procps \
     lsof \
-    wget \
     tree \
-    apt-transport-https \
     psmisc \
     net-tools \
     ; \
