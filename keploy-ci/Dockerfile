@@ -30,6 +30,14 @@ RUN set -eux; \
     xz-utils \
     iptables \
     uidmap \
+    # Additional packages used in CI pipelines
+    procps \
+    lsof \
+    wget \
+    tree \
+    apt-transport-https \
+    psmisc \
+    net-tools \
     ; \
     rm -rf /var/lib/apt/lists/*
 
@@ -72,6 +80,17 @@ RUN set -eux; \
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 ENV CGO_ENABLED=1
+
+# Install MinIO client (mc) - used heavily in CI pipelines for artifact storage
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+    amd64) MC_ARCH='linux-amd64' ;; \
+    arm64) MC_ARCH='linux-arm64' ;; \
+    *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.min.io/client/mc/release/${MC_ARCH}/mc" -o /usr/local/bin/mc; \
+    chmod +x /usr/local/bin/mc
 
 # Helper to start dockerd inside the step container
 # Supports optional DOCKERD_FLAGS env (e.g. "--registry-mirror=http://x:5000")
