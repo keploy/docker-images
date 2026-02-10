@@ -23,9 +23,20 @@ RUN set -eux; \
     netcat-openbsd \
     sudo \
     build-essential \
+    gcc \
+    libc-dev \
+    pkg-config \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     linux-headers-$(dpkg --print-architecture) \
+    libgl1-mesa-dev \
+    libxi-dev \
+    libxcursor-dev \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxxf86vm-dev \
+    libx11-dev \
+    libx11-xcb-dev \
     coreutils \
     util-linux \
     passwd \
