@@ -2,7 +2,7 @@
 # Base includes: dockerd, docker CLI, buildx, containerd, runc
 FROM debian:trixie-slim
 
-ARG GO_VERSION=1.25.0
+ARG GO_VERSION=1.25.7
 # Keep Docker "major.minor" aligned with the latest stable version
 ARG DOCKER_MAJOR_MINOR=29.1
 
