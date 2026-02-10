@@ -17,6 +17,7 @@ RUN set -eux; \
     git \
     openssh-client \
     jq \
+    openssl \
     socat \
     iproute2 \
     netcat-openbsd \
