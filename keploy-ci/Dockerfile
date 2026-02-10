@@ -22,6 +22,8 @@ RUN set -eux; \
     netcat-openbsd \
     sudo \
     build-essential \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
     linux-headers-$(dpkg --print-architecture) \
     coreutils \
     util-linux \
@@ -37,6 +39,15 @@ RUN set -eux; \
     psmisc \
     net-tools \
     ; \
+    rm -rf /var/lib/apt/lists/*
+
+# Install clang-14 from Debian Bookworm (not available in Trixie)
+RUN set -eux; \
+    echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list; \
+    printf 'Package: *\nPin: release n=bookworm\nPin-Priority: 100\n\nPackage: clang-14 lib*clang*14* libllvm14* llvm-14*\nPin: release n=bookworm\nPin-Priority: 500\n' > /etc/apt/preferences.d/clang-14; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends clang-14; \
+    rm -f /etc/apt/sources.list.d/bookworm.list /etc/apt/preferences.d/clang-14; \
     rm -rf /var/lib/apt/lists/*
 
 # Install Docker Engine (dockerd + docker CLI + buildx plugin + containerd)
