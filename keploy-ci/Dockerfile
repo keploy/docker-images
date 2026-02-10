@@ -18,6 +18,7 @@ RUN set -eux; \
     openssh-client \
     jq \
     openssl \
+    python3 \
     socat \
     iproute2 \
     netcat-openbsd \
