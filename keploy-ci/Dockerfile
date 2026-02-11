@@ -31,6 +31,7 @@ RUN set -eux; \
       net-tools \
       netcat-openbsd \
       nodejs \
+      npm \
       openssh-client \
       openssl \
       passwd \
