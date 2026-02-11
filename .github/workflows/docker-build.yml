@@ -1,0 +1,47 @@
+name: Docker Build CI
+
+on:
+  pull_request:
+    paths:
+      - keploy-ci/**
+      - .github/workflows/docker-build.yml
+  push:
+    branches:
+      - main
+    paths:
+      - keploy-ci/**
+      - .github/workflows/docker-build.yml
+  workflow_dispatch:
+
+jobs:
+  docker-build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build keploy-ci image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./keploy-ci
+          file: ./keploy-ci/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          tags: keploy-ci:ci-${{ matrix.arch }}
