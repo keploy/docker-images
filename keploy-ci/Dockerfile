@@ -54,6 +54,18 @@ RUN set -eux; \
     ; \
     rm -rf /var/lib/apt/lists/*
 
+# Install Windows cross-compiler for CGO Windows/AMD64 builds.
+# Keep it amd64-only to avoid breaking arm64 image builds when package availability differs.
+RUN set -eux; \
+    if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        gcc-mingw-w64-x86-64 \
+        g++-mingw-w64-x86-64 \
+      ; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Install clang-14 from Debian Bookworm (not available in Trixie)
 RUN set -eux; \
     echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list; \
