@@ -26,6 +26,7 @@ RUN set -eux; \
       lsof \
       net-tools \
       netcat-openbsd \
+      nodejs \
       openssh-client \
       openssl \
       passwd \
@@ -33,6 +34,8 @@ RUN set -eux; \
       procps \
       psmisc \
       python3 \
+      python3-pip \
+      python3-venv \
       socat \
       sudo \
       tar \
@@ -41,11 +44,13 @@ RUN set -eux; \
       util-linux \
       xz-utils \
       build-essential \
+      default-jdk \
       gcc \
       g++-aarch64-linux-gnu \
       gcc-aarch64-linux-gnu \
       libc-dev \
       libgl1-mesa-dev \
+      maven \
       libx11-dev \
       libx11-xcb-dev \
       libxcursor-dev \
