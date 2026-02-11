@@ -12,6 +12,10 @@ ARG TARGETARCH
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     apt-get update; \
+    EXTRA_PKGS=""; \
+    if [ "$ARCH" = "amd64" ]; then \
+      EXTRA_PKGS="gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64"; \
+    fi; \
     apt-get install -y --no-install-recommends \
       bash \
       ca-certificates \
@@ -57,20 +61,10 @@ RUN set -eux; \
       libxi-dev \
       libxinerama-dev \
       libxrandr-dev \
-      libxxf86vm-dev; \
+      libxxf86vm-dev \
+      $EXTRA_PKGS; \
+    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
-
-# Install Windows cross-compilers for CGO Windows/amd64 builds.
-# Keep this amd64-only to avoid arm64 package availability issues.
-RUN set -eux; \
-    ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    if [ "$ARCH" = "amd64" ]; then \
-      apt-get update; \
-      apt-get install -y --no-install-recommends \
-        gcc-mingw-w64-x86-64 \
-        g++-mingw-w64-x86-64; \
-      rm -rf /var/lib/apt/lists/*; \
-    fi
 
 # Install clang-14 from Debian Bookworm (not available in Trixie).
 RUN set -eux; \
@@ -87,6 +81,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends clang-14; \
     rm -f /etc/apt/sources.list.d/bookworm.list /etc/apt/preferences.d/clang-14; \
+    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
 # Install Docker Engine (dockerd + docker CLI + buildx + compose).
@@ -111,6 +106,7 @@ RUN set -eux; \
       containerd.io \
       docker-buildx-plugin \
       docker-compose-plugin; \
+    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
 # Install Go and MinIO client (mc).
@@ -127,8 +123,7 @@ RUN set -eux; \
     curl -fsSL "https://dl.min.io/client/mc/release/linux-${ARCH}/mc" -o /usr/local/bin/mc; \
     chmod +x /usr/local/bin/mc
 
-ENV PATH="/usr/local/go/bin:${PATH}" \
-    CGO_ENABLED=1
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Helper script to start dockerd inside the step container.
 # Supports optional DOCKERD_FLAGS (for example: "--registry-mirror=http://x:5000").
