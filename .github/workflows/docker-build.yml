@@ -16,7 +16,7 @@ on:
 jobs:
   # ── Stage 1: base images (no cross-image deps) ─────────────────────
   base-images:
-    name: "${{ matrix.name }} (${{ matrix.arch }})"
+    name: "${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }})"
     runs-on: ubuntu-latest
 
     strategy:
@@ -24,39 +24,39 @@ jobs:
       matrix:
         include:
           # --- multi-arch images ---
-          - name: keploy-ci
-            context: ./keploy-ci
+          - context: ./keploy-ci
+            tag-prefix: ''
             arch: amd64
-          - name: keploy-ci
-            context: ./keploy-ci
+          - context: ./keploy-ci
+            tag-prefix: ''
             arch: arm64
-          - name: keploy-ci-slim
-            context: ./keploy-ci-slim
+          - context: ./keploy-ci-slim
+            tag-prefix: 'slim-'
             arch: amd64
-          - name: keploy-ci-slim
-            context: ./keploy-ci-slim
+          - context: ./keploy-ci-slim
+            tag-prefix: 'slim-'
             arch: arm64
-          - name: keploy-ci-timefreeze
-            context: ./keploy-ci-timefreeze
+          - context: ./keploy-ci-timefreeze
+            tag-prefix: 'timefreeze-'
             arch: amd64
-          - name: keploy-ci-timefreeze
-            context: ./keploy-ci-timefreeze
+          - context: ./keploy-ci-timefreeze
+            tag-prefix: 'timefreeze-'
             arch: arm64
-          - name: keploy-ci-golint
-            context: ./keploy-ci-golint
+          - context: ./keploy-ci-golint
+            tag-prefix: 'golint-'
             arch: amd64
-          - name: keploy-ci-golint
-            context: ./keploy-ci-golint
+          - context: ./keploy-ci-golint
+            tag-prefix: 'golint-'
             arch: arm64
-          - name: keploy-ci-awscli
-            context: ./keploy-ci-awscli
+          - context: ./keploy-ci-awscli
+            tag-prefix: 'awscli-'
             arch: amd64
-          - name: keploy-ci-awscli
-            context: ./keploy-ci-awscli
+          - context: ./keploy-ci-awscli
+            tag-prefix: 'awscli-'
             arch: arm64
           # --- amd64-only images ---
-          - name: keploy-ci-go-build
-            context: ./keploy-ci-go-build
+          - context: ./keploy-ci-go-build
+            tag-prefix: 'go-build-'
             arch: amd64
 
     steps:
@@ -70,17 +70,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.name }}
+      - name: Build ${{ matrix.tag-prefix || 'base' }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           push: false
-          tags: ${{ matrix.name }}:ci-${{ matrix.arch }}
+          tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}
 
   # ── Stage 2: images that derive FROM keploy-ci ─────────────────────
   derived-images:
-    name: "${{ matrix.name }} (${{ matrix.arch }})"
+    name: "${{ matrix.tag-prefix }} (${{ matrix.arch }})"
     needs: base-images
     runs-on: ubuntu-latest
 
@@ -88,23 +88,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: keploy-ci-node
-            context: ./keploy-ci-node
+          - context: ./keploy-ci-node
+            tag-prefix: 'node-'
             arch: amd64
-          - name: keploy-ci-node
-            context: ./keploy-ci-node
+          - context: ./keploy-ci-node
+            tag-prefix: 'node-'
             arch: arm64
-          - name: keploy-ci-java
-            context: ./keploy-ci-java
+          - context: ./keploy-ci-java
+            tag-prefix: 'java-'
             arch: amd64
-          - name: keploy-ci-java
-            context: ./keploy-ci-java
+          - context: ./keploy-ci-java
+            tag-prefix: 'java-'
             arch: arm64
-          - name: keploy-ci-python
-            context: ./keploy-ci-python
+          - context: ./keploy-ci-python
+            tag-prefix: 'python-'
             arch: amd64
-          - name: keploy-ci-python
-            context: ./keploy-ci-python
+          - context: ./keploy-ci-python
+            tag-prefix: 'python-'
             arch: arm64
 
     steps:
@@ -118,10 +118,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build ${{ matrix.name }}
+      - name: Build ${{ matrix.tag-prefix }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           push: false
-          tags: ${{ matrix.name }}:ci-${{ matrix.arch }}
+          tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}

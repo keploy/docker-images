@@ -9,6 +9,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # All variants are pushed as tags under the same GHCR package.
+  IMAGE: ghcr.io/keploy/keploy-ci
 
 jobs:
   # ── Stage 1: Base images (no inter-image dependencies) ──────────────
@@ -23,24 +25,24 @@ jobs:
       matrix:
         include:
           # Multi-arch (amd64 + arm64)
-          - name: keploy-ci
-            context: ./keploy-ci
+          - context: ./keploy-ci
+            tag-prefix: ''
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-slim
-            context: ./keploy-ci-slim
+          - context: ./keploy-ci-slim
+            tag-prefix: 'slim-'
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-timefreeze
-            context: ./keploy-ci-timefreeze
+          - context: ./keploy-ci-timefreeze
+            tag-prefix: 'timefreeze-'
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-golint
-            context: ./keploy-ci-golint
+          - context: ./keploy-ci-golint
+            tag-prefix: 'golint-'
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-awscli
-            context: ./keploy-ci-awscli
+          - context: ./keploy-ci-awscli
+            tag-prefix: 'awscli-'
             platforms: linux/amd64,linux/arm64
           # amd64-only (MinGW cross-compiler is x86-64 only)
-          - name: keploy-ci-go-build
-            context: ./keploy-ci-go-build
+          - context: ./keploy-ci-go-build
+            tag-prefix: 'go-build-'
             platforms: linux/amd64
 
     steps:
@@ -64,12 +66,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}
+            type=raw,value=${{ matrix.tag-prefix }}latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -94,14 +96,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: keploy-ci-node
-            context: ./keploy-ci-node
+          - context: ./keploy-ci-node
+            tag-prefix: 'node-'
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-java
-            context: ./keploy-ci-java
+          - context: ./keploy-ci-java
+            tag-prefix: 'java-'
             platforms: linux/amd64,linux/arm64
-          - name: keploy-ci-python
-            context: ./keploy-ci-python
+          - context: ./keploy-ci-python
+            tag-prefix: 'python-'
             platforms: linux/amd64,linux/arm64
 
     steps:
@@ -125,12 +127,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}
+            type=raw,value=${{ matrix.tag-prefix }}latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
