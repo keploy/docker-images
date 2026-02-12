@@ -1,6 +1,6 @@
 # keploy-ci-python: keploy-ci + Python 3 + pip + venv (DinD + eBPF capable)
 # Used by: python-linux.yml
-FROM ghcr.io/keploy/keploy-ci:1.2.8
+FROM ghcr.io/keploy/keploy-ci:1.2.9
 
 RUN set -eux; \
     apt-get update; \

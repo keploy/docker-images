@@ -7,6 +7,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
         gcc-mingw-w64-x86-64 \
         g++-mingw-w64-x86-64 \
+        jq \
     ; \
     rm -rf /var/lib/apt/lists/*; \
     # Install MinIO client
