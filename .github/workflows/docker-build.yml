@@ -3,28 +3,108 @@ name: Docker Build CI
 on:
   pull_request:
     paths:
-      - keploy-ci/**
+      - 'keploy-ci*/**'
       - .github/workflows/docker-build.yml
   push:
     branches:
       - main
     paths:
-      - keploy-ci/**
+      - 'keploy-ci*/**'
       - .github/workflows/docker-build.yml
   workflow_dispatch:
 
 jobs:
-  docker-build:
-    name: Build ${{ matrix.platform }}
+  # ── Stage 1: base images (no cross-image deps) ─────────────────────
+  base-images:
+    name: "${{ matrix.name }} (${{ matrix.arch }})"
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: linux/amd64
+          # --- multi-arch images ---
+          - name: keploy-ci
+            context: ./keploy-ci
             arch: amd64
-          - platform: linux/arm64
+          - name: keploy-ci
+            context: ./keploy-ci
+            arch: arm64
+          - name: keploy-ci-slim
+            context: ./keploy-ci-slim
+            arch: amd64
+          - name: keploy-ci-slim
+            context: ./keploy-ci-slim
+            arch: arm64
+          - name: keploy-ci-timefreeze
+            context: ./keploy-ci-timefreeze
+            arch: amd64
+          - name: keploy-ci-timefreeze
+            context: ./keploy-ci-timefreeze
+            arch: arm64
+          - name: keploy-ci-golint
+            context: ./keploy-ci-golint
+            arch: amd64
+          - name: keploy-ci-golint
+            context: ./keploy-ci-golint
+            arch: arm64
+          - name: keploy-ci-awscli
+            context: ./keploy-ci-awscli
+            arch: amd64
+          - name: keploy-ci-awscli
+            context: ./keploy-ci-awscli
+            arch: arm64
+          # --- amd64-only images ---
+          - name: keploy-ci-go-build
+            context: ./keploy-ci-go-build
+            arch: amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          tags: ${{ matrix.name }}:ci-${{ matrix.arch }}
+
+  # ── Stage 2: images that derive FROM keploy-ci ─────────────────────
+  derived-images:
+    name: "${{ matrix.name }} (${{ matrix.arch }})"
+    needs: base-images
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: keploy-ci-node
+            context: ./keploy-ci-node
+            arch: amd64
+          - name: keploy-ci-node
+            context: ./keploy-ci-node
+            arch: arm64
+          - name: keploy-ci-java
+            context: ./keploy-ci-java
+            arch: amd64
+          - name: keploy-ci-java
+            context: ./keploy-ci-java
+            arch: arm64
+          - name: keploy-ci-python
+            context: ./keploy-ci-python
+            arch: amd64
+          - name: keploy-ci-python
+            context: ./keploy-ci-python
             arch: arm64
 
     steps:
@@ -32,17 +112,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up QEMU
-        if: matrix.platform == 'linux/arm64'
+        if: matrix.arch == 'arm64'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build keploy-ci image
+      - name: Build ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
-          context: ./keploy-ci
-          file: ./keploy-ci/Dockerfile
-          platforms: ${{ matrix.platform }}
+          context: ${{ matrix.context }}
+          platforms: linux/${{ matrix.arch }}
           push: false
-          tags: keploy-ci:ci-${{ matrix.arch }}
+          tags: ${{ matrix.name }}:ci-${{ matrix.arch }}
