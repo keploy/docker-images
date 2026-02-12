@@ -9,20 +9,39 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  # ── Stage 1: Base images (no inter-image dependencies) ──────────────
+  base-images:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
 
     strategy:
+      fail-fast: false
       matrix:
-        image:
+        include:
+          # Multi-arch (amd64 + arm64)
           - name: keploy-ci
             context: ./keploy-ci
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-slim
+            context: ./keploy-ci-slim
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-timefreeze
+            context: ./keploy-ci-timefreeze
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-golint
+            context: ./keploy-ci-golint
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-awscli
+            context: ./keploy-ci-awscli
+            platforms: linux/amd64,linux/arm64
+          # amd64-only (MinGW cross-compiler is x86-64 only)
+          - name: keploy-ci-go-build
+            context: ./keploy-ci-go-build
+            platforms: linux/amd64
 
     steps:
       - name: Checkout repository
@@ -45,7 +64,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image.name }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -53,10 +72,71 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.image.context }}
-          platforms: linux/amd64,linux/arm64
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Stage 2: Images that depend on keploy-ci ────────────────────────
+  derived-images:
+    needs: base-images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: keploy-ci-node
+            context: ./keploy-ci-node
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-java
+            context: ./keploy-ci-java
+            platforms: linux/amd64,linux/arm64
+          - name: keploy-ci-python
+            context: ./keploy-ci-python
+            platforms: linux/amd64,linux/arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
