@@ -35,8 +35,8 @@ RUN set -eux; \
     dpkg -i /tmp/mongodb-database-tools.deb || apt-get install -yf --no-install-recommends; \
     rm -f /tmp/mongodb-database-tools.deb; \
     \
-    # Install zip (needed for report archiving)
-    apt-get install -y --no-install-recommends zip; \
+    # Install zip (report archiving) and zstd (cache compression)
+    apt-get install -y --no-install-recommends zip zstd; \
     \
     # Cleanup
     apt-get clean; \
