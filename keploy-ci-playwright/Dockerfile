@@ -14,19 +14,26 @@ ARG PLAYWRIGHT_VERSION=1.58.2
 # 2. Install MongoDB Database Tools (mongorestore, mongodump, etc.) so we can
 #    restore test fixtures without `apt-get install` inside a mongo container.
 # 3. Clean up caches to keep the image small.
+ARG MONGO_TOOLS_VERSION=100.10.0
+ARG MONGO_TOOLS_DEB_RELEASE=1
+
 RUN set -eux; \
     # Install Playwright and Chromium with system deps
     npm install -g playwright@${PLAYWRIGHT_VERSION}; \
     npx playwright install --with-deps chromium; \
     \
-    # Install MongoDB Database Tools from the official repo
-    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-        gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg; \
-    echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
-https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" \
-        > /etc/apt/sources.list.d/mongodb-org-7.0.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends mongodb-database-tools; \
+    # Install MongoDB Database Tools directly from .deb package.
+    # (The MongoDB apt repo GPG key uses SHA1 which Debian trixie rejects.)
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+        amd64) MONGO_ARCH="x86_64" ;; \
+        arm64) MONGO_ARCH="aarch64" ;; \
+        *) echo "Unsupported arch: $ARCH"; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/mongodb-database-tools.deb \
+        "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-${MONGO_ARCH}-${MONGO_TOOLS_VERSION}.deb"; \
+    dpkg -i /tmp/mongodb-database-tools.deb || apt-get install -yf --no-install-recommends; \
+    rm -f /tmp/mongodb-database-tools.deb; \
     \
     # Install zip (needed for report archiving)
     apt-get install -y --no-install-recommends zip; \
