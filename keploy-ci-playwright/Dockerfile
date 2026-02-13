@@ -1,7 +1,7 @@
 # keploy-ci-playwright: keploy-ci-node + Playwright Chromium + mongoDB tools
 # Eliminates per-run downloads of ~500MB (Playwright browser + system deps + mongo tools).
 # Used by: playwright.yml, playwright-e2e.yml (Woodpecker CI)
-FROM ghcr.io/keploy/keploy-ci:node-1.2.13
+FROM ghcr.io/keploy/keploy-ci:node-1.2.14
 
 # Pin Playwright to a known version so the pre-installed browser stays valid.
 # Bump this ARG (and rebuild the image) whenever enterprise-ui updates its
