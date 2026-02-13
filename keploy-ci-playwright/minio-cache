@@ -1,0 +1,91 @@
+#!/usr/bin/env sh
+# minio-cache — Save and restore CI caches via MinIO.
+#
+# Usage:
+#   minio-cache restore <cache-key>   # Download & unpack if available
+#   minio-cache save    <cache-key>   # Pack & upload
+#
+# Required environment variables:
+#   MINIO_ENDPOINT   – e.g. http://192.168.116.165:9001
+#   MINIO_ACCESS_KEY – e.g. keploy
+#   MINIO_SECRET_KEY – (from secret)
+#   CACHE_BUCKET     – defaults to $BUCKET or "woodpecker"
+#   CACHE_PATHS      – colon-separated list of directories to cache
+#                       e.g. "/root/.npm:/root/go/pkg/mod"
+#
+# The <cache-key> argument is used as the object name inside the bucket's
+# "caches/" prefix.  Typical keys:
+#   npm-<hash>      – node_modules / npm cache
+#   gomod-<hash>    – Go module cache
+#
+# Examples:
+#   # Restore npm cache before `npm ci`
+#   export CACHE_PATHS="/root/.npm"
+#   minio-cache restore "npm-${REPO_NAME}"
+#
+#   # After build, save it back
+#   minio-cache save "npm-${REPO_NAME}"
+#
+set -eu
+
+ACTION="${1:-}"
+CACHE_KEY="${2:-}"
+BUCKET="${CACHE_BUCKET:-${BUCKET:-woodpecker}}"
+ALIAS="cache_mc"
+PREFIX="caches"
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+info() { echo "[minio-cache] $*"; }
+
+[ -n "$ACTION" ] && [ -n "$CACHE_KEY" ] || die "Usage: minio-cache <restore|save> <cache-key>"
+
+# Validate env
+for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY; do
+  eval val=\$$v
+  [ -n "$val" ] || die "Environment variable $v is required"
+done
+
+[ -n "${CACHE_PATHS:-}" ] || die "CACHE_PATHS must be set (colon-separated directories)"
+
+# Configure mc alias (idempotent)
+mc alias set "$ALIAS" "$MINIO_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null 2>&1
+mc mb -p "${ALIAS}/${BUCKET}" >/dev/null 2>&1 || true
+
+OBJECT="${ALIAS}/${BUCKET}/${PREFIX}/${CACHE_KEY}.tar.zst"
+
+case "$ACTION" in
+  restore)
+    if mc stat "$OBJECT" >/dev/null 2>&1; then
+      info "Restoring cache: $CACHE_KEY"
+      mc cat "$OBJECT" | tar --zstd -xf - -C /
+      info "Cache restored successfully"
+    else
+      info "No cache found for key: $CACHE_KEY (cold start)"
+    fi
+    ;;
+
+  save)
+    # Convert colon-separated paths to space-separated, skip missing dirs
+    DIRS=""
+    OLDIFS="$IFS"; IFS=":"; set -- $CACHE_PATHS; IFS="$OLDIFS"
+    for d in "$@"; do
+      [ -d "$d" ] && DIRS="$DIRS $d"
+    done
+
+    if [ -z "$DIRS" ]; then
+      info "Nothing to cache (no directories exist)"
+      exit 0
+    fi
+
+    info "Saving cache: $CACHE_KEY (paths:$DIRS)"
+    tar --zstd -cf - $DIRS | mc pipe "$OBJECT"
+
+    # Set 30-day expiry on caches prefix (idempotent, ignores if already set)
+    mc ilm rule add --expire-days 30 "${ALIAS}/${BUCKET}" --prefix "${PREFIX}/" 2>/dev/null || true
+    info "Cache saved successfully"
+    ;;
+
+  *)
+    die "Unknown action: $ACTION (use 'restore' or 'save')"
+    ;;
+esac

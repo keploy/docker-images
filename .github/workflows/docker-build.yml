@@ -106,6 +106,9 @@ jobs:
           - context: ./keploy-ci-python
             tag-prefix: 'python-'
             arch: arm64
+          - context: ./keploy-ci-playwright
+            tag-prefix: 'playwright-'
+            arch: amd64
 
     steps:
       - name: Checkout repository
