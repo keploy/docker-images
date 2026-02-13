@@ -1,6 +1,6 @@
 # keploy-ci-node: keploy-ci + Node.js 20 (DinD + eBPF capable)
 # Used by: node-linux.yml, node-docker-linux.yml
-FROM ghcr.io/keploy/keploy-ci:1.2.9
+FROM ghcr.io/keploy/keploy-ci:1.2.11
 
 RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
