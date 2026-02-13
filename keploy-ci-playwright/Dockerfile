@@ -3,7 +3,7 @@
 # MongoDB Database Tools, and CI utilities. Node modules and the Playwright browser
 # binary are cached via MinIO at pipeline runtime.
 # Used by: playwright.yml, playwright-e2e.yml (Woodpecker CI)
-FROM ghcr.io/keploy/keploy-ci:node-1.2.15
+FROM ghcr.io/keploy/keploy-ci:node-1.2.16
 
 ARG MONGO_TOOLS_VERSION=100.10.0
 
