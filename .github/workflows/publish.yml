@@ -108,6 +108,9 @@ jobs:
           - context: ./keploy-ci-playwright
             tag-prefix: 'playwright-'
             platforms: linux/amd64
+          - context: ./keploy-ci-lighthouse
+            tag-prefix: 'lighthouse-'
+            platforms: linux/amd64
 
     steps:
       - name: Checkout repository

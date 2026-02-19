@@ -109,6 +109,9 @@ jobs:
           - context: ./keploy-ci-playwright
             tag-prefix: 'playwright-'
             arch: amd64
+          - context: ./keploy-ci-lighthouse
+            tag-prefix: 'lighthouse-'
+            arch: amd64
 
     steps:
       - name: Checkout repository
