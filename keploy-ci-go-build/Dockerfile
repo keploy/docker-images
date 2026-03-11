@@ -1,6 +1,6 @@
 # keploy-ci-go-build: Go + MinGW cross-compilers + MinIO client
 # Used by: go-test.yml download-and-build, prepare-and-run.yml build-and-upload-keploy
-FROM public.ecr.aws/docker/library/golang:1.25-bookworm
+FROM public.ecr.aws/docker/library/golang:1.26-bookworm
 
 RUN set -eux; \
     apt-get update; \

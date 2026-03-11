@@ -1,6 +1,6 @@
 # keploy-ci-golint: Go + golangci-lint pre-installed
 # Used by: golangci-lint.yml
-FROM public.ecr.aws/docker/library/golang:1.25-bookworm
+FROM public.ecr.aws/docker/library/golang:1.26-bookworm
 
 ARG GOLANGCI_LINT_VERSION=v2.9.0
 
