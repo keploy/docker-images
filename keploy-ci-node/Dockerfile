@@ -1,9 +1,9 @@
-# keploy-ci-node: keploy-ci + Node.js 20 + minio-cache (DinD + eBPF capable)
+# keploy-ci-node: keploy-ci + Node.js 24 + minio-cache (DinD + eBPF capable)
 # Used by: node-linux.yml, node-docker-linux.yml, enterprise-ui node-ci.yml
-FROM ghcr.io/keploy/keploy-ci:1.2.14
+FROM ghcr.io/keploy/keploy-ci:1.2.23
 
 RUN set -eux; \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; \
     apt-get install -y --no-install-recommends nodejs zstd; \
     rm -rf /var/lib/apt/lists/*; \
     node --version; \
