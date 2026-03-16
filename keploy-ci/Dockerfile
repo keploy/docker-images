@@ -40,6 +40,7 @@ RUN set -eux; \
         uidmap \
         util-linux \
         xz-utils \
+        zstd \
     ; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
