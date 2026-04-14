@@ -54,6 +54,12 @@ jobs:
           - context: ./keploy-ci-awscli
             tag-prefix: 'awscli-'
             arch: arm64
+          - context: ./keploy-ci-azurecli
+            tag-prefix: 'azurecli-'
+            arch: amd64
+          - context: ./keploy-ci-azurecli
+            tag-prefix: 'azurecli-'
+            arch: arm64
           # --- amd64-only images ---
           - context: ./keploy-ci-go-build
             tag-prefix: 'go-build-'
