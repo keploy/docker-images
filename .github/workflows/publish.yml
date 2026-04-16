@@ -40,6 +40,9 @@ jobs:
           - context: ./keploy-ci-awscli
             tag-prefix: 'awscli-'
             platforms: linux/amd64,linux/arm64
+          - context: ./keploy-ci-azurecli
+            tag-prefix: 'azurecli-'
+            platforms: linux/amd64,linux/arm64
           # amd64-only (MinGW cross-compiler is x86-64 only)
           - context: ./keploy-ci-go-build
             tag-prefix: 'go-build-'
