@@ -41,7 +41,7 @@ RUN set -eux; \
         rm /tmp/jattach.tgz; \
     done; \
     ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    case "$ARCH" in amd64|arm64) ;; *) echo "unsupported ARCH=$ARCH" >&2; exit 1 ;; esac; \
+    case "$ARCH" in amd64|arm64) ;; *) echo "unsupported ARCH='$ARCH' (supported: amd64, arm64). Build with BuildKit/buildx or pass --build-arg TARGETARCH=amd64|arm64." >&2; exit 1 ;; esac; \
     ln -s "/opt/jattach/${ARCH}/jattach" /usr/local/bin/jattach; \
     test -x /opt/jattach/amd64/jattach; \
     test -x /opt/jattach/arm64/jattach; \
