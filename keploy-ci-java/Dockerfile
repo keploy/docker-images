@@ -4,6 +4,8 @@
 # into a multi-arch buildx context.
 FROM ghcr.io/keploy/keploy-ci:1.2.9
 
+# Provided automatically by BuildKit/buildx; fallback to dpkg when unset
+# (legacy / `docker build` without --build-arg).
 ARG TARGETARCH
 
 RUN set -eux; \
@@ -38,6 +40,11 @@ RUN set -eux; \
         chmod +x "/opt/jattach/${out}/jattach"; \
         rm /tmp/jattach.tgz; \
     done; \
-    ln -s "/opt/jattach/${TARGETARCH}/jattach" /usr/local/bin/jattach; \
+    ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$ARCH" in amd64|arm64) ;; *) echo "unsupported ARCH=$ARCH" >&2; exit 1 ;; esac; \
+    ln -s "/opt/jattach/${ARCH}/jattach" /usr/local/bin/jattach; \
+    test -x /opt/jattach/amd64/jattach; \
+    test -x /opt/jattach/arm64/jattach; \
+    test -x /usr/local/bin/jattach; \
     /usr/local/bin/jattach 2>&1 | head -1 || true; \
-    ls -la /opt/jattach/amd64/ /opt/jattach/arm64/
+    ls -la /opt/jattach/amd64/ /opt/jattach/arm64/ /usr/local/bin/jattach
