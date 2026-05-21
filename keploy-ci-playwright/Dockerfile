@@ -28,7 +28,7 @@ RUN set -eux; \
     rm -f /tmp/mongodb-database-tools.deb; \
     \
     # ── CI utilities
-    apt-get install -y --no-install-recommends zip zstd; \
+    apt-get install -y --no-install-recommends zip zstd ffmpeg; \
     \
     # ── Cleanup
     apt-get clean; \
