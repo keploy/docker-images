@@ -80,8 +80,9 @@ case "$ACTION" in
     info "Saving cache: $CACHE_KEY (paths:$DIRS)"
     tar --zstd -cf - $DIRS | mc pipe "$OBJECT"
 
-    # Set 30-day expiry on caches prefix (idempotent, ignores if already set)
-    mc ilm rule add --expire-days 30 "${ALIAS}/${BUCKET}" --prefix "${PREFIX}/" 2>/dev/null || true
+    # NOTE: MinIO lifecycle/retention is managed server-side (canonical rule set on the MinIO instance).
+    # Do NOT add lifecycle rules from CI - the add command is NOT idempotent; each call appends a
+    # duplicate rule and the bucket hit MinIO's 1000-rule cap, breaking retention (2026-08-13 incident).
     info "Cache saved successfully"
     ;;
 
