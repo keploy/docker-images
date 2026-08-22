@@ -14,6 +14,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── Stage 0: the minio-cache helper is duplicated per build context (Docker
+  # cannot COPY outside a context). Drift between copies is how the ILM
+  # rule-spam regression shipped, so fail fast when they diverge.
+  helper-parity:
+    name: "minio-cache copies identical"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compare every baked minio-cache against the canonical copy
+        run: |
+          set -eux
+          canonical=keploy-ci-node/minio-cache
+          status=0
+          for f in $(git ls-files '*/minio-cache'); do
+            [ "$f" = "$canonical" ] && continue
+            diff -u "$canonical" "$f" || status=1
+          done
+          exit $status
+
   # ── Stage 1: base images (no cross-image deps) ─────────────────────
   base-images:
     name: "${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }})"

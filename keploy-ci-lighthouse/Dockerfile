@@ -2,6 +2,11 @@
 # Used by: landing lighthouse.yml (Lighthouse score comparison on PRs)
 FROM ghcr.io/keploy/keploy-ci:node-1.2.17
 
+# The base node image pins a pre-fix tag whose baked minio-cache appended a MinIO
+# ILM rule on every cache save; ship the current helper so it cannot be inherited.
+COPY minio-cache /usr/local/bin/minio-cache
+RUN chmod +x /usr/local/bin/minio-cache
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Chromium and all its runtime dependencies
