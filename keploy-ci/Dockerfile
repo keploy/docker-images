@@ -6,7 +6,7 @@
 # Linux binaries with CGO_ENABLED=0.
 FROM public.ecr.aws/docker/library/debian:trixie-slim
 
-ARG GO_VERSION=1.26.0
+ARG GO_VERSION=1.27.0
 # Keep Docker "major.minor" aligned with the latest stable release.
 ARG DOCKER_MAJOR_MINOR=29.1
 # Provided automatically by BuildKit/buildx; fallback to dpkg when unset.
