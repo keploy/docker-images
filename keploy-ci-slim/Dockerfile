@@ -37,7 +37,7 @@ RUN set -eux; \
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
     esac; \
     COSIGN_VERSION=v2.5.2; \
-    curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${COSIGN_ARCH}" \
+    curl -sSfL --retry 5 --retry-delay 2 --retry-all-errors "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${COSIGN_ARCH}" \
       -o /usr/local/bin/cosign; \
     chmod +x /usr/local/bin/cosign
 
