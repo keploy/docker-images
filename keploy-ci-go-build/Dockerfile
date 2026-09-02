@@ -11,5 +11,5 @@ RUN set -eux; \
     ; \
     rm -rf /var/lib/apt/lists/*; \
     # Install MinIO client
-    curl -fsSL "https://dl.min.io/client/mc/release/linux-amd64/mc" -o /usr/local/bin/mc; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "https://dl.min.io/client/mc/release/linux-amd64/mc" -o /usr/local/bin/mc; \
     chmod +x /usr/local/bin/mc

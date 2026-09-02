@@ -65,7 +65,7 @@ RUN set -eux; \
         arm64) MONGO_ARCH="aarch64" ;; \
         *) echo "Unsupported arch: $ARCH"; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/mongodb-database-tools.deb \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o /tmp/mongodb-database-tools.deb \
         "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-${MONGO_ARCH}-${MONGO_TOOLS_VERSION}.deb"; \
     dpkg -i /tmp/mongodb-database-tools.deb || apt-get install -yf --no-install-recommends; \
     rm -f /tmp/mongodb-database-tools.deb; \
