@@ -50,7 +50,7 @@ RUN set -eux; \
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     install -m 0755 -d /etc/apt/keyrings; \
-    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; \
     chmod a+r /etc/apt/keyrings/docker.gpg; \
     echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" \
       > /etc/apt/sources.list.d/docker.list; \
@@ -77,7 +77,7 @@ RUN set -eux; \
         amd64|arm64) ;; \
         *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
     esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz; \
     rm -rf /usr/local/go; \
     tar -C /usr/local -xzf /tmp/go.tgz; \
     rm -f /tmp/go.tgz
@@ -85,7 +85,7 @@ RUN set -eux; \
 # Install MinIO client (mc) — used for artifact storage in CI pipelines.
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    curl -fsSL "https://dl.min.io/client/mc/release/linux-${ARCH}/mc" -o /usr/local/bin/mc; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "https://dl.min.io/client/mc/release/linux-${ARCH}/mc" -o /usr/local/bin/mc; \
     chmod +x /usr/local/bin/mc
 
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"

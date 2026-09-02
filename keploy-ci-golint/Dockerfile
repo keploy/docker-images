@@ -29,8 +29,8 @@ RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     name="golangci-lint-${version}-linux-${arch}"; \
     url="https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_LINT_VERSION}"; \
-    curl -sSfL "${url}/${name}.tar.gz" -o /tmp/golangci-lint.tar.gz; \
-    curl -sSfL "${url}/golangci-lint-${version}-checksums.txt" -o /tmp/golangci-lint-checksums.txt; \
+    curl -sSfL --retry 5 --retry-delay 2 --retry-all-errors "${url}/${name}.tar.gz" -o /tmp/golangci-lint.tar.gz; \
+    curl -sSfL --retry 5 --retry-delay 2 --retry-all-errors "${url}/golangci-lint-${version}-checksums.txt" -o /tmp/golangci-lint-checksums.txt; \
     want="$(awk -v f="${name}.tar.gz" '$2 == f { print $1 }' /tmp/golangci-lint-checksums.txt)"; \
     test -n "${want}"; \
     echo "${want}  /tmp/golangci-lint.tar.gz" | sha256sum -c -; \
