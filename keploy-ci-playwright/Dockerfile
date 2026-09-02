@@ -33,13 +33,22 @@ RUN set -eux; \
     # bytes ship in a layer the agents already cache, and pipeline-time cost goes
     # to zero.
     #
-    # Installed to the default location for the image's user (root, HOME unset ->
-    # /root/.cache/ms-playwright). That path matters: it is what enterprise-ui's
-    # .ci/scripts/restore-playwright-cache.sh and the install guard in
-    # playwright-setup.sh both probe, so a baked image short-circuits BOTH the
-    # MinIO restore and `npx playwright install` with no change needed there.
+    # Installed to the default location for the image's user: root, with HOME set
+    # to /root, so the browsers land in /root/.cache/ms-playwright. That path
+    # matters — it is what enterprise-ui's .ci/scripts/restore-playwright-cache.sh
+    # probes, so a baked image short-circuits the MinIO restore with no change
+    # needed there.
+    #
+    # It does NOT skip `npx playwright install`, and must not: that call is
+    # deliberately unguarded on the consumer side. Playwright resolves a browser
+    # by revision, so after a package-lock bump this directory is non-empty but
+    # holds the WRONG build — a guard keyed on "is the directory non-empty" would
+    # then skip the install too and every lane would die at "Executable doesn't
+    # exist at .../chromium-<rev>". Letting the install run makes it a no-op when
+    # the revision matches and a self-heal when it does not.
+    #
     # Do not set PLAYWRIGHT_BROWSERS_PATH — that would move the browsers away
-    # from where those probes look and silently reintroduce the download.
+    # from where the restore probe looks and silently reintroduce the download.
     #
     # If the consuming repo bumps @playwright/test past PLAYWRIGHT_VERSION above,
     # nothing breaks: the revision will not match, and the runtime path falls back
