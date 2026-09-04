@@ -8,6 +8,12 @@ RUN set -eux; \
         gcc-mingw-w64-x86-64 \
         g++-mingw-w64-x86-64 \
         jq \
+        # This image runs the gate build (prepare-and-run's
+        # build-and-upload-keploy) and go-test's download-and-build, both of
+        # which tar/compress the Go build cache and the shipped binary. gzip is
+        # single-threaded and was measurably the slowest part of those steps.
+        zstd \
+        pigz \
     ; \
     rm -rf /var/lib/apt/lists/*; \
     # Install MinIO client

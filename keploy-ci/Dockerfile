@@ -41,6 +41,7 @@ RUN set -eux; \
         util-linux \
         xz-utils \
         zstd \
+        pigz \
     ; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*

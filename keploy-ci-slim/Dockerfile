@@ -9,6 +9,13 @@ RUN set -eux; \
     ca-certificates \
     curl \
     tar \
+    # zstd and pigz are here for the CI artifact/cache paths: this image runs
+    # the download-artifacts steps (~59 per enterprise PR pipeline), and the
+    # objects they move are compressed. Single-threaded gzip is the slow part —
+    # on a real 2.1 GB Go build cache, gzip took 14.6 s to compress and 7.8 s to
+    # decompress where zstd -T0 took 1.3 s each way.
+    zstd \
+    pigz \
     git \
     openssh-client \
     jq \
