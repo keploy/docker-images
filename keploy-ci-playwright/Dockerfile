@@ -101,6 +101,39 @@ RUN set -eux; \
     echo "${PLAYWRIGHT_VERSION}" > /root/.cache/ms-playwright/.baked-playwright-version; \
     echo "Baked Playwright ${PLAYWRIGHT_VERSION}, chromium revision $(cat /root/.cache/ms-playwright/.baked-chromium-revision)"
 
+# ── Kubernetes CLIs for the DaemonSet / cloud-replay e2e lanes.
+#
+# Eight enterprise lanes (daemonset-{arm-race,crossapp-contam,
+# go-timefreeze-nocommand,jsse-execrace,overlay-mark,podcache-arm,
+# tls-record-replay} and selfhosted-cloud-replay) each fetched these three
+# binaries from the public internet on every run — ~73 MiB per lane, ~580 MiB
+# per PR pipeline, on each lane's critical path and each one a WAN dependency
+# that can flake the lane.
+#
+# Every one of those lanes already guards the fetch with `if ! command -v <tool>`,
+# so baking them here is picked up with no pipeline change and degrades safely:
+# an older image simply downloads them as before.
+#
+# The versions match what those lanes pin, so behaviour is unchanged. Keep them
+# in step with the lanes if either side moves.
+ARG KIND_VERSION=v0.24.0
+ARG KUBECTL_VERSION=v1.31.0
+ARG HELM_VERSION=v3.16.4
+
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"; \
+    chmod +x /usr/local/bin/kind; \
+    curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"; \
+    chmod +x /usr/local/bin/kubectl; \
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz" \
+      | tar -xz -C /tmp --strip-components=1 "linux-${ARCH}/helm"; \
+    install -m 0755 /tmp/helm /usr/local/bin/helm; \
+    rm -f /tmp/helm; \
+    kind version; \
+    kubectl version --client; \
+    helm version --short
+
 # Cache helper script for MinIO-backed npm/Go caching.
 COPY minio-cache /usr/local/bin/minio-cache
 RUN chmod +x /usr/local/bin/minio-cache
