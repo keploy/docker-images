@@ -7,10 +7,17 @@ FROM ghcr.io/keploy/keploy-ci:node-1.2.25
 ARG MONGO_TOOLS_VERSION=100.10.0
 
 # Must track the `@playwright/test` version pinned in the consuming repo's
-# package-lock.json (enterprise-ui: 1.57.0). Playwright resolves a browser build
+# package-lock.json (enterprise-ui: 1.62.1). Playwright resolves a browser build
 # by revision, so a mismatch means the baked browser is ignored — see the note on
 # the install step below for what happens then.
-ARG PLAYWRIGHT_VERSION=1.57.0
+#
+# 1.57.0 -> 1.62.1 moves the chromium revision from 1200 to 1234. Measured in
+# enterprise-ui while the two were out of step: the baked directory is non-empty
+# but holds 1200, so the consumer's restore guard reports "already present",
+# skips the MinIO cache, and `npx playwright install` then pulls ~300 MiB from
+# Microsoft's CDN (Chrome 184.3 MiB + Headless Shell 114.7 MiB) — about five
+# minutes, on every one of ~16 lanes, on the critical path.
+ARG PLAYWRIGHT_VERSION=1.62.1
 
 RUN set -eux; \
     # ── Playwright system dependencies (OS packages only).
@@ -76,10 +83,23 @@ RUN set -eux; \
     # fail far downstream with a missing-executable error. Assert here instead.
     test -d /root/.cache/ms-playwright; \
     test -n "$(ls -A /root/.cache/ms-playwright)"; \
+    # Both halves, named. A lane needs the full browser AND the headless shell,
+    # and "non-empty" is satisfied by either one alone.
+    test -n "$(find /root/.cache/ms-playwright -maxdepth 1 -name 'chromium-*' -print -quit)"; \
+    test -n "$(find /root/.cache/ms-playwright -maxdepth 1 -name 'chromium_headless_shell-*' -print -quit)"; \
     ls -1 /root/.cache/ms-playwright; \
     find /root/.cache/ms-playwright -name 'headless_shell' -o -name 'chrome' | head -5; \
     du -sh /root/.cache/ms-playwright; \
-    echo "Static dependencies + Chromium ${PLAYWRIGHT_VERSION} baked successfully"
+    # Record WHAT was baked, so a consumer can tell "browsers are present" from
+    # "the browsers this lockfile actually wants are present" — the distinction
+    # that costs ~300 MiB per lane when it is guessed instead of checked. The
+    # probes downstream only test that the directory is non-empty, which a stale
+    # revision satisfies; this file is what lets them do better without having to
+    # know how Playwright lays the directory out.
+    basename "$(find /root/.cache/ms-playwright -maxdepth 1 -name 'chromium-*' -print -quit)" \
+      | sed 's/^chromium-//' > /root/.cache/ms-playwright/.baked-chromium-revision; \
+    echo "${PLAYWRIGHT_VERSION}" > /root/.cache/ms-playwright/.baked-playwright-version; \
+    echo "Baked Playwright ${PLAYWRIGHT_VERSION}, chromium revision $(cat /root/.cache/ms-playwright/.baked-chromium-revision)"
 
 # Cache helper script for MinIO-backed npm/Go caching.
 COPY minio-cache /usr/local/bin/minio-cache
