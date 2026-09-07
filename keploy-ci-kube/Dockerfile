@@ -60,3 +60,17 @@ RUN set -eux; \
     kubectl version --client; \
     helm version --short; \
     yq --version | grep -qF 'mikefarah/yq'
+
+# PyYAML for python3. k8s-proxy's ds-node-pinning e2e (tests/e2e/ds-node-pinning/
+# run.sh) parses pod/report YAML and `helm template` output with python3's `yaml`
+# module — the only kube e2e lane that does. It was `py3-yaml` on the old Alpine
+# docker:cli image; the base keploy-ci carries python3 but not this module, so a
+# lane on this image otherwise had to `apt-get install python3-yaml` at RUN time
+# (a per-run WAN install this image exists to eliminate). Bake it here.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3-yaml; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    # verify the module imports (fail the build, not the lane)
+    python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
