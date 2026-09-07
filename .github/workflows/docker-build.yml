@@ -133,6 +133,12 @@ jobs:
           - context: ./keploy-ci-python
             tag-prefix: 'python-'
             arch: arm64
+          - context: ./keploy-ci-kube
+            tag-prefix: 'kube-'
+            arch: amd64
+          - context: ./keploy-ci-kube
+            tag-prefix: 'kube-'
+            arch: arm64
           - context: ./keploy-ci-playwright
             tag-prefix: 'playwright-'
             arch: amd64

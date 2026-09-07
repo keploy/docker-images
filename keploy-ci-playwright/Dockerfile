@@ -114,11 +114,12 @@ RUN set -eux; \
 # so baking them here is picked up with no pipeline change and degrades safely:
 # an older image simply downloads them as before.
 #
-# The versions match what those lanes pin, so behaviour is unchanged. Keep them
-# in step with the lanes if either side moves.
+# STANDARD kube-tool versions — kept in step with keploy-ci-kube/Dockerfile,
+# which is the canonical source of truth for these across all e2e lanes. If you
+# bump one, bump both. (helm moved v3.16.4 -> v3.17.3 to match the standard.)
 ARG KIND_VERSION=v0.24.0
 ARG KUBECTL_VERSION=v1.31.0
-ARG HELM_VERSION=v3.16.4
+ARG HELM_VERSION=v3.17.3
 
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
