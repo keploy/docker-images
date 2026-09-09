@@ -3,7 +3,7 @@
 FROM ghcr.io/keploy/keploy-ci:1.2.23
 
 RUN set -eux; \
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://deb.nodesource.com/setup_24.x | bash -; \
     apt-get install -y --no-install-recommends nodejs zstd; \
     rm -rf /var/lib/apt/lists/*; \
     node --version; \
