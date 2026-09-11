@@ -141,31 +141,19 @@ jobs:
             || { echo "::error::publish.yml never passes a node- prefixed BASE_TAG"; fail=1; }
           exit "$fail"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build the base and load it locally
-        uses: docker/build-push-action@v6
-        with:
-          context: ./keploy-ci
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: ghcr.io/keploy/keploy-ci:pr-threading-test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build node FROM that base, not from a published tag
-        uses: docker/build-push-action@v6
-        with:
-          context: ./keploy-ci-node
-          platforms: linux/amd64
-          push: false
-          load: true
-          build-args: |
-            BASE_TAG=pr-threading-test
-          tags: keploy-ci-node:pr-threading-test
-          cache-from: type=gha
+      # Deliberately NOT setup-buildx-action. That action makes a
+      # docker-container builder the default, and that driver resolves `FROM`
+      # against the REGISTRY — so a base built here with load:true lands in the
+      # local daemon where the next build cannot see it, and the build fails with
+      # "ghcr.io/keploy/keploy-ci:pr-threading-test: not found". Plain
+      # `docker build` uses the default docker driver, which reads and writes the
+      # local image store, which is exactly what chaining two builds needs.
+      - name: Build the base, then node FROM that local base
+        run: |
+          set -eux
+          docker build -t ghcr.io/keploy/keploy-ci:pr-threading-test ./keploy-ci
+          docker build --build-arg BASE_TAG=pr-threading-test \
+            -t keploy-ci-node:pr-threading-test ./keploy-ci-node
 
       - name: The derived image must carry the base's Go, not a stale one
         run: |
