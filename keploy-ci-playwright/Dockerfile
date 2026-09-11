@@ -2,8 +2,26 @@
 # Pre-installs the OS-level libraries Chromium needs (fonts, libatk, libnss, etc.),
 # THE CHROMIUM BROWSER ITSELF, MongoDB Database Tools, and CI utilities.
 # Used by: playwright.yml, playwright-e2e.yml (Woodpecker CI)
-FROM ghcr.io/keploy/keploy-ci:node-1.2.25
-
+# The base tag is a BUILD ARG, not a frozen literal.
+#
+# Every derived image here used to hard-code `FROM ghcr.io/keploy/keploy-ci:<tag>`,
+# and nothing ever moved those literals: publish.yml rebuilds all variants on each
+# release, but each one kept building on whatever base tag was current the day it
+# was written. keploy-ci-node sat on 1.2.23 for nine releases, so when the base
+# moved to Go 1.27 (#21) node — and everything FROM node, including playwright —
+# silently stayed on Go 1.26. Downstream repos then built go-1.27 modules in a
+# go-1.26 image and, because these images default GOTOOLCHAIN=auto, pulled a
+# ~325MB toolchain at pipeline time instead of failing.
+#
+# publish.yml now passes BASE_TAG=<version being published>, so a derived image
+# always sits on the base from the SAME release. The default below is only for a
+# bare `docker build` outside CI.
+# NOTE: node-1.2.32 is itself still Go 1.26 — the node tags only gain Go 1.27
+# from the first release built with this change. So a bare local `docker build`
+# of this image reproduces the old behaviour until then; CI always overrides
+# BASE_TAG with the version being published.
+ARG BASE_TAG=node-1.2.32
+FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 ARG MONGO_TOOLS_VERSION=100.10.0
 
 # Must track the `@playwright/test` version pinned in the consuming repo's

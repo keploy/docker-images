@@ -1,6 +1,6 @@
 # keploy-ci-slim: Lightweight image for shell-only and MinIO CI steps
 # Use this for: setup-auth, tag-guard, cleanup, download/upload artifacts, cosign, etc.
-FROM public.ecr.aws/docker/library/alpine:3.21
+FROM alpine:3.21
 
 # Common CI utilities (no Go, no Docker, no C compilers)
 RUN set -eux; \
@@ -34,7 +34,14 @@ RUN set -eux; \
       aarch64) MC_ARCH='linux-arm64'; COSIGN_ARCH='arm64' ;; \
       *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
     esac; \
-    curl -fsSL "https://dl.min.io/client/mc/release/${MC_ARCH}/mc" -o /usr/local/bin/mc; \
+    case "$COSIGN_ARCH" in \
+      amd64) MC_SHA=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891 ;; \
+      arm64) MC_SHA=14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c ;; \
+    esac; \
+    MC_RELEASE=RELEASE.2025-08-13T08-35-41Z; \
+    curl -fsSL "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.${MC_ARCH}.${MC_RELEASE}" \
+      -o /usr/local/bin/mc; \
+    echo "$MC_SHA  /usr/local/bin/mc" | sha256sum -c -; \
     chmod +x /usr/local/bin/mc; \
     # Install cosign for Docker image signing
     COSIGN_VERSION=v2.5.2; \

@@ -4,7 +4,7 @@
 # CGO is only needed for Windows cross-compilation, which is handled
 # by the keploy-ci-go-build image (with MinGW). This image builds
 # Linux binaries with CGO_ENABLED=0.
-FROM public.ecr.aws/docker/library/debian:trixie-slim
+FROM debian:trixie-slim
 
 ARG GO_VERSION=1.27.0
 # Keep Docker "major.minor" aligned with the latest stable release.
@@ -84,9 +84,23 @@ RUN set -eux; \
     rm -f /tmp/go.tgz
 
 # Install MinIO client (mc) — used for artifact storage in CI pipelines.
+# MinIO retired the unversioned download path: https://dl.min.io/client/mc/...
+# now answers 410 Gone for every arch, which broke every build of this image
+# (and of keploy-ci-slim and keploy-ci-go-build) regardless of branch. Pull the
+# PINNED GitHub release asset instead and VERIFY it, which is what the rest of
+# this repo does for tools — the old URL was both floating and unchecked, so a
+# replaced binary would have shipped silently.
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
 RUN set -eux; \
     ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    curl -fsSL "https://dl.min.io/client/mc/release/linux-${ARCH}/mc" -o /usr/local/bin/mc; \
+    case "$ARCH" in \
+      amd64) MC_SHA=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891 ;; \
+      arm64) MC_SHA=14c8c9616cfce4636add161304353244e8de383b2e2752c0e9dad01d4c27c12c ;; \
+      *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-${ARCH}.${MC_RELEASE}" \
+      -o /usr/local/bin/mc; \
+    echo "$MC_SHA  /usr/local/bin/mc" | sha256sum -c -; \
     chmod +x /usr/local/bin/mc
 
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
