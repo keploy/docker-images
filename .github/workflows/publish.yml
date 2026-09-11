@@ -88,7 +88,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── Stage 2: Images that depend on keploy-ci ────────────────────────
-  derived-images:
+  # Tier 2 — built FROM the base keploy-ci published by base-images above.
+  # keploy-ci-node is its own job because tier 3 builds FROM it. Bundling it with
+  # java/python/kube would make playwright and lighthouse hostage to legs they do
+  # not depend on: a `needs:` on a fail-fast:false matrix still fails if ANY leg
+  # fails, and java/python/kube each fetch tools over the WAN.
+  node-image:
     needs: base-images
     runs-on: ubuntu-latest
     permissions:
@@ -102,6 +107,91 @@ jobs:
           - context: ./keploy-ci-node
             tag-prefix: 'node-'
             platforms: linux/amd64,linux/arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve base tag
+        id: base
+        # github.ref_name reaches the shell through env, NEVER interpolated into
+        # the script body. A tag name is attacker-controllable by anyone who can
+        # push a tag, git permits quotes/backticks/$() in one (only spaces are
+        # rejected), and this job holds `packages: write` on the image every
+        # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
+        # and executes if interpolated.
+        #
+        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
+        # below is gated on is_default_branch, which is false for tag and release
+        # refs). Falling back would publish an image tagged with this release
+        # while built on a stale or missing base — the exact defect BASE_TAG
+        # exists to remove. Fail instead.
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          case "$REF" in
+            v[0-9]*) echo "version=${REF#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::publish.yml expects a vX.Y.Z tag, got '$REF'"; exit 1 ;;
+          esac
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}
+            type=raw,value=${{ matrix.tag-prefix }}latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          # Build on the base from THIS release, not a literal frozen in the
+          # Dockerfile. github.ref_name is the pushed tag (vX.Y.Z); strip the v.
+          build-args: |
+            BASE_TAG=${{ steps.base.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Tier 3 — built FROM keploy-ci-node, so it MUST wait for tier 2.
+  #
+  # These previously sat in tier 2's matrix and therefore ran in PARALLEL with
+  # node, which is exactly why keploy-ci-playwright pinned an already-published
+  # node tag: the node image from the same release did not exist yet when
+  # playwright built. Gating this tier on the one above, with BASE_TAG threaded
+  # through, means one release now yields node-<v> and playwright-<v> sharing a
+  # base instead of playwright inheriting whatever node tag was current years ago.
+  derived-images:
+    needs: base-images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - context: ./keploy-ci-java
             tag-prefix: 'java-'
             platforms: linux/amd64,linux/arm64
@@ -111,6 +201,92 @@ jobs:
           - context: ./keploy-ci-kube
             tag-prefix: 'kube-'
             platforms: linux/amd64,linux/arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve base tag
+        id: base
+        # github.ref_name reaches the shell through env, NEVER interpolated into
+        # the script body. A tag name is attacker-controllable by anyone who can
+        # push a tag, git permits quotes/backticks/$() in one (only spaces are
+        # rejected), and this job holds `packages: write` on the image every
+        # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
+        # and executes if interpolated.
+        #
+        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
+        # below is gated on is_default_branch, which is false for tag and release
+        # refs). Falling back would publish an image tagged with this release
+        # while built on a stale or missing base — the exact defect BASE_TAG
+        # exists to remove. Fail instead.
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          case "$REF" in
+            v[0-9]*) echo "version=${REF#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::publish.yml expects a vX.Y.Z tag, got '$REF'"; exit 1 ;;
+          esac
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}
+            type=raw,value=${{ matrix.tag-prefix }}latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          # Build on the base from THIS release, not a literal frozen in the
+          # Dockerfile. github.ref_name is the pushed tag (vX.Y.Z); strip the v.
+          build-args: |
+            BASE_TAG=${{ steps.base.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Tier 3 — built FROM keploy-ci-node, so it MUST wait for tier 2.
+  #
+  # These previously sat in tier 2's matrix and therefore ran in PARALLEL with
+  # node, which is exactly why keploy-ci-playwright pinned an already-published
+  # node tag: the node image from the same release did not exist yet when
+  # playwright built. Gating this tier on the one above, with BASE_TAG threaded
+  # through, means one release now yields node-<v> and playwright-<v> sharing a
+  # base instead of playwright inheriting whatever node tag was current years ago.
+  node-derived-images:
+    needs: node-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - context: ./keploy-ci-playwright
             tag-prefix: 'playwright-'
             platforms: linux/amd64
@@ -135,6 +311,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve base tag
+        id: base
+        # github.ref_name reaches the shell through env, NEVER interpolated into
+        # the script body. A tag name is attacker-controllable by anyone who can
+        # push a tag, git permits quotes/backticks/$() in one (only spaces are
+        # rejected), and this job holds `packages: write` on the image every
+        # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
+        # and executes if interpolated.
+        #
+        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
+        # below is gated on is_default_branch, which is false for tag and release
+        # refs). Falling back would publish an image tagged with this release
+        # while built on a stale or missing base — the exact defect BASE_TAG
+        # exists to remove. Fail instead.
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          case "$REF" in
+            v[0-9]*) echo "version=${REF#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::publish.yml expects a vX.Y.Z tag, got '$REF'"; exit 1 ;;
+          esac
+
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -152,6 +351,10 @@ jobs:
           context: ${{ matrix.context }}
           platforms: ${{ matrix.platforms }}
           push: true
+          # Build on the base from THIS release, not a literal frozen in the
+          # Dockerfile. github.ref_name is the pushed tag (vX.Y.Z); strip the v.
+          build-args: |
+            BASE_TAG=node-${{ steps.base.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
