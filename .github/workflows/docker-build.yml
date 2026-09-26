@@ -251,7 +251,7 @@ jobs:
           run 'cp /t/s3-test.sh /usr/local/lib/keploy-ci/ && S3_TEST_LIVE=1 S3_TEST_LARGE_MB=64 sh /usr/local/lib/keploy-ci/s3-test.sh'
           # minio-cache round trip through the image's own copies.
           run 'set -eu
-            mkdir -p /root/cachetest/sub && head -c 300000 /dev/urandom > /root/cachetest/sub/blob
+            mkdir -p /root/cachetest/sub && head -c 3000000 /dev/urandom > /root/cachetest/sub/blob
             want=$(md5sum < /root/cachetest/sub/blob)
             CACHE_PATHS=/root/cachetest:/root/does-not-exist minio-cache save ci-roundtrip
             rm -rf /root/cachetest
@@ -262,10 +262,12 @@ jobs:
             if MINIO_SECRET_KEY=wrong CACHE_PATHS=/root/cachetest minio-cache save ci-roundtrip; then
               echo "a save the store refused reported success"; exit 1
             fi
-            # A stream that does not arrive whole never unpacks: the object is
-            # rewritten with one byte changed but the MD5 the writer declared,
-            # so s3.sh withholds its last range and the restore removes what
-            # tar had made (a stale tree included) and is a cold start.
+            # A stream that does not arrive whole never unpacks as a whole cache:
+            # the object is rewritten with one byte changed but the MD5 the
+            # writer declared, so s3.sh streams its first 1 MiB ranges and
+            # withholds the last. tar has started on /root/cachetest by then;
+            # the restore removes that directory, says so, is a cold start, and
+            # leaves alone a cache directory the stream never reached.
             S3=/usr/local/lib/keploy-ci/s3.sh
             sh "$S3" get woodpecker/caches/ci-roundtrip.tar.zst /tmp/good.zst
             good=$(md5sum < /tmp/good.zst | cut -d" " -f1); cp /tmp/good.zst /tmp/bad.zst
@@ -273,16 +275,26 @@ jobs:
             curl -sf -o /dev/null -T /tmp/bad.zst --aws-sigv4 aws:amz:us-east-1:s3 -u "$MINIO_ACCESS_KEY:$MINIO_SECRET_KEY" \
               -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -H "x-amz-meta-s3sh-md5: $good" \
               "$MINIO_ENDPOINT/woodpecker/caches/ci-roundtrip.tar.zst"
-            mkdir -p /root/cachetest && echo stale > /root/cachetest/stale
-            out=$(CACHE_PATHS=/root/cachetest minio-cache restore ci-roundtrip 2>&1) || { echo "a corrupt cache failed the lane: $out"; exit 1; }
-            case "$out" in *"s3.sh exit 6"*) ;; *) echo "a corrupt cache was not reported as one: $out"; exit 1 ;; esac
+            mkdir -p /root/cachetest /root/untouched && echo stale > /root/cachetest/stale && echo baked > /root/untouched/f
+            out=$(S3_PART_BYTES=1048576 CACHE_PATHS=/root/cachetest:/root/untouched minio-cache restore ci-roundtrip 2>&1) \
+              || { echo "a corrupt cache failed the lane: $out"; exit 1; }
+            case "$out" in *"s3.sh exit 6"*"removed the partly unpacked /root/cachetest;"*) ;; *) echo "a corrupt cache was not reported as one, with what was removed: $out"; exit 1 ;; esac
             [ ! -e /root/cachetest ] || { echo "a stream that did not arrive whole left a cache behind"; exit 1; }
+            [ "$(cat /root/untouched/f)" = baked ] || { echo "a cache directory the stream never reached was removed"; exit 1; }
+            # A store that cannot answer unpacks nothing, so it removes nothing:
+            # what the image had there (browsers baked into a cache path) stays.
+            mkdir -p /root/cachetest && echo baked > /root/cachetest/f
+            out=$(MINIO_ENDPOINT=http://127.0.0.1:9 S3_RETRIES=2 S3_RETRY_DELAY=0 S3_CONNECT_TIMEOUT=2 \
+              CACHE_PATHS=/root/cachetest minio-cache restore ci-roundtrip 2>&1) || { echo "an unreachable store failed the lane: $out"; exit 1; }
+            case "$out" in *"s3.sh exit 5"*"nothing had been unpacked; the cache directories are as they were"*) ;; *) echo "an unreachable store was not reported as one: $out"; exit 1 ;; esac
+            [ "$(cat /root/cachetest/f)" = baked ] || { echo "an unreachable store removed a cache it never unpacked into"; exit 1; }
+            rm -rf /root/cachetest
             # Without the baked copy it falls back to the s3.sh beside it (the
             # repo checkout), and a set CDPATH must not corrupt that path.
             rm /usr/local/lib/keploy-ci/s3.sh
             out=$(CDPATH=/ CACHE_PATHS=/root/cachetest sh /t/minio-cache restore absent-key) || { echo "fallback lookup failed"; exit 1; }
             case "$out" in *"cold start"*) ;; *) echo "fallback lookup did not reach the store: $out"; exit 1 ;; esac
-            echo "minio-cache: save/restore/miss/refused/corrupt all behave"'
+            echo "minio-cache: save/restore/miss/refused/corrupt/unreachable all behave"'
 
       - name: The derived image must carry the base's Go, not a stale one
         run: |

@@ -37,8 +37,12 @@
 #            before tar sees it, and the last one only once the whole object's
 #            MD5 matches, so a corrupt or cut stream never unpacks as a whole
 #            cache. It is all or nothing: if the stream or tar fails partway,
-#            every CACHE_PATHS directory is removed again (an absent cache is a
-#            cold start; half of one is a broken build). A miss is a cold start
+#            every CACHE_PATHS directory tar had started unpacking into is
+#            removed again (an absent cache is a cold start; half of one is a
+#            broken build). A failure before tar unpacked anything (a store
+#            that is down, or times out before the first byte) touches nothing:
+#            what the directories held before (e.g. browsers baked into
+#            /root/.cache/ms-playwright) stays. A miss is a cold start
 #            (exit 0). A store that cannot deliver the object is reported
 #            loudly on stderr and is also a cold start (exit 0), as it always
 #            was for this helper: callers in several repos run it without
@@ -88,18 +92,34 @@ S3=/usr/local/lib/keploy-ci/s3.sh
 
 OBJECT="${BUCKET}/${PREFIX}/${CACHE_KEY}.tar.zst"
 TMP=
-cleanup() { [ -z "$TMP" ] || rm -f "$TMP" "$TMP.tar"; }
-# Remove every cache directory again (read-only module-cache dirs included).
-wipe() {
+cleanup() { [ -z "$TMP" ] || rm -f "$TMP" "$TMP.tar" "$TMP.list"; }
+# Undo a restore that failed partway: remove each CACHE_PATHS directory that
+# tar unpacked at least one member into (read-only module-cache dirs
+# included), per tar's own listing ($TMP.list, `tar -v`: a member is listed
+# before its bytes are written), and leave the others exactly as they were.
+# Sets UNDONE to what the log should say.
+undo_partial() {
   OLDIFS="$IFS"; IFS=":"
   # shellcheck disable=SC2086 # split CACHE_PATHS on ':' on purpose
   set -- $CACHE_PATHS
   IFS="$OLDIFS"
+  removed=
   for d in "$@"; do
-    [ -e "$d" ] || continue
-    chmod -R u+w "$d" 2>/dev/null || true
-    rm -rf "$d"
+    rel=${d#/}; rel=${rel%/}
+    awk -v p="$rel" '$0 == p || $0 == p "/" || index($0, p "/") == 1 { found = 1; exit } END { exit !found }' "$TMP.list" || continue
+    if [ -e "$d" ]; then
+      chmod -R u+w "$d" 2>/dev/null || true
+      rm -rf "$d"
+    fi
+    removed="$removed $d"
   done
+  if [ -n "$removed" ]; then
+    UNDONE="removed the partly unpacked$removed"
+  elif [ -s "$TMP.list" ]; then
+    UNDONE="unpacked only outside CACHE_PATHS; removed nothing"
+  else
+    UNDONE="nothing had been unpacked; the cache directories are as they were"
+  fi
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
@@ -113,14 +133,14 @@ case "$ACTION" in
     info "Restoring cache: $CACHE_KEY"
     trc=0
     { rc=0; S3_OP_TIMEOUT="${S3_OP_TIMEOUT:-600}" sh "$S3" cat "$OBJECT" || rc=$?; echo "$rc" > "$TMP"; } \
-      | tar --zstd -xf - -C / 2>"$TMP.tar" || trc=$?
+      | tar --zstd -xvf - -C / > "$TMP.list" 2>"$TMP.tar" || trc=$?
     rc=$(cat "$TMP")
     case "$rc" in
       0)
         if [ "$trc" -ne 0 ]; then
           sed 's/^/[minio-cache]   tar: /' "$TMP.tar" >&2
-          wipe
-          die "unpacking $CACHE_KEY failed (tar exit $trc) after a verified download; removed the partial restore"
+          undo_partial
+          die "unpacking $CACHE_KEY failed (tar exit $trc) after a verified download; $UNDONE"
         fi
         info "Cache restored successfully (streamed, verified)"
         ;;
@@ -128,8 +148,8 @@ case "$ACTION" in
         info "No cache found for key: $CACHE_KEY (cold start)"
         ;;
       *)
-        wipe
-        echo "WARNING: [minio-cache] the object store could not deliver $OBJECT whole (s3.sh exit $rc, above); removed whatever had been unpacked, continuing without the cache (cold start)" >&2
+        undo_partial
+        echo "WARNING: [minio-cache] the object store could not deliver $OBJECT whole (s3.sh exit $rc, above); $UNDONE; continuing without the cache (cold start)" >&2
         ;;
     esac
     ;;
