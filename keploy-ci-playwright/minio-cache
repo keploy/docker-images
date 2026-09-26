@@ -7,7 +7,7 @@
 # as .ci/scripts/s3.sh. MinIO's `mc` is no longer in these images.)
 #
 # Usage:
-#   minio-cache restore <cache-key>   # Download, verify & unpack if available
+#   minio-cache restore <cache-key>   # Stream, verify & unpack if available
 #   minio-cache save    <cache-key>   # Pack & upload
 #
 # Required environment variables:
@@ -32,27 +32,29 @@
 #   minio-cache save "npm-${REPO_NAME}"
 #
 # What each side guarantees:
-#   restore  The object is downloaded to a temp file and verified (size, and MD5
-#            where its ETag is one) BEFORE tar sees a byte, so a connection cut
-#            mid-object can no longer leave a half-extracted cache behind (the old
-#            `mc cat | tar -x` could). A miss is a cold start (exit 0). A store
-#            that cannot answer is reported loudly on stderr and is also a cold
-#            start (exit 0), as it always was for this helper: callers in several
-#            repos run it without `|| true`. A failed extract (e.g. a full disk)
-#            still exits non-zero, as the old `mc cat | tar -x` did.
-#   save     The archive is written to a temp file and uploaded with ONE PUT
-#            (Content-MD5, read back): the object is replaced whole or not at
-#            all. A failed upload exits non-zero (as a failed `mc pipe` did; the
-#            old `tar | mc pipe` could also publish a truncated archive when tar
-#            died mid-stream, which this cannot). An archive over 5 GiB (S3's
-#            single-PUT limit; s3.sh's S3_MAX_PUT_BYTES) is not uploaded: that
-#            is reported on stderr and the save exits 0 -- the cache is skipped
-#            (any object already under the key stays as it was), the lane is
-#            not failed.
-#   disk     Both sides need the compressed archive's size free in
-#            ${TMPDIR:-/tmp} (restore: beside the tree it expands into). That
-#            is the price of verifying before extracting; the old streams used
-#            no scratch space.
+#   restore  Streamed, as the old `mc cat | tar -x` was, so the archive never
+#            lands on disk, but through `s3.sh cat`: every byte range is checked
+#            before tar sees it, and the last one only once the whole object's
+#            MD5 matches, so a corrupt or cut stream never unpacks as a whole
+#            cache. It is all or nothing: if the stream or tar fails partway,
+#            every CACHE_PATHS directory is removed again (an absent cache is a
+#            cold start; half of one is a broken build). A miss is a cold start
+#            (exit 0). A store that cannot deliver the object is reported
+#            loudly on stderr and is also a cold start (exit 0), as it always
+#            was for this helper: callers in several repos run it without
+#            `|| true`. A failed extract of a verified stream (e.g. a full disk)
+#            still exits non-zero, as the old `mc cat | tar -x` did. The whole
+#            restore is capped at S3_OP_TIMEOUT (600 s): a store that is slow
+#            but alive means a cold start, not a stalled lane.
+#   save     The archive is written to a temp file and uploaded as ONE object
+#            (Content-MD5 on every request, read back; over 5 GiB a verified
+#            multipart upload): the object is replaced whole or not at all. A
+#            failed upload exits non-zero (as a failed `mc pipe` did; the old
+#            `tar | mc pipe` could also publish a truncated archive when tar
+#            died mid-stream, which this cannot).
+#   disk     restore needs no scratch space beyond s3.sh's in-flight ranges
+#            (128 MiB); save needs the compressed archive's size free in
+#            ${TMPDIR:-/tmp}.
 #   buckets  Never created here (no `mc mb`): a new bucket on the store gets no
 #            retention. Lifecycle rules are locked on the store (retention is
 #            server-side); CI never writes one.
@@ -86,27 +88,48 @@ S3=/usr/local/lib/keploy-ci/s3.sh
 
 OBJECT="${BUCKET}/${PREFIX}/${CACHE_KEY}.tar.zst"
 TMP=
-cleanup() { [ -z "$TMP" ] || rm -f "$TMP"; }
+cleanup() { [ -z "$TMP" ] || rm -f "$TMP" "$TMP.tar"; }
+# Remove every cache directory again (read-only module-cache dirs included).
+wipe() {
+  OLDIFS="$IFS"; IFS=":"
+  # shellcheck disable=SC2086 # split CACHE_PATHS on ':' on purpose
+  set -- $CACHE_PATHS
+  IFS="$OLDIFS"
+  for d in "$@"; do
+    [ -e "$d" ] || continue
+    chmod -R u+w "$d" 2>/dev/null || true
+    rm -rf "$d"
+  done
+}
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 case "$ACTION" in
   restore)
+    # s3.sh's exit code comes back through a file: a POSIX pipeline reports
+    # only tar's.
     TMP=$(mktemp "${TMPDIR:-/tmp}/minio-cache.XXXXXXXX")
-    rc=0
-    sh "$S3" get "$OBJECT" "$TMP" || rc=$?
+    info "Restoring cache: $CACHE_KEY"
+    trc=0
+    { rc=0; S3_OP_TIMEOUT="${S3_OP_TIMEOUT:-600}" sh "$S3" cat "$OBJECT" || rc=$?; echo "$rc" > "$TMP"; } \
+      | tar --zstd -xf - -C / 2>"$TMP.tar" || trc=$?
+    rc=$(cat "$TMP")
     case "$rc" in
       0)
-        info "Restoring cache: $CACHE_KEY"
-        tar --zstd -xf "$TMP" -C /
-        info "Cache restored successfully"
+        if [ "$trc" -ne 0 ]; then
+          sed 's/^/[minio-cache]   tar: /' "$TMP.tar" >&2
+          wipe
+          die "unpacking $CACHE_KEY failed (tar exit $trc) after a verified download; removed the partial restore"
+        fi
+        info "Cache restored successfully (streamed, verified)"
         ;;
       3)
         info "No cache found for key: $CACHE_KEY (cold start)"
         ;;
       *)
-        echo "WARNING: [minio-cache] the object store could not serve $OBJECT (s3.sh exit $rc, above); continuing without the cache (cold start)" >&2
+        wipe
+        echo "WARNING: [minio-cache] the object store could not deliver $OBJECT whole (s3.sh exit $rc, above); removed whatever had been unpacked, continuing without the cache (cold start)" >&2
         ;;
     esac
     ;;
@@ -129,12 +152,6 @@ case "$ACTION" in
     TMP=$(mktemp "${TMPDIR:-/tmp}/minio-cache.XXXXXXXX")
     # shellcheck disable=SC2086 # DIRS is a space-separated list of existing dirs
     tar --zstd -cf "$TMP" $DIRS
-    size=$(wc -c < "$TMP" | tr -d ' ')
-    limit=${S3_MAX_PUT_BYTES:-5368709120}
-    if [ "$size" -gt "$limit" ]; then
-      echo "WARNING: [minio-cache] $CACHE_KEY is $size bytes, over the $limit-byte single-PUT limit (S3_MAX_PUT_BYTES); NOT saved -- any object already under this key is left as it was. Narrow CACHE_PATHS." >&2
-      exit 0
-    fi
     rc=0
     sh "$S3" put "$TMP" "$OBJECT" || rc=$?
     [ "$rc" -eq 0 ] || die "cache upload of $OBJECT failed (s3.sh exit $rc, above)"
