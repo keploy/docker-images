@@ -23,6 +23,10 @@ RUN set -eux; \
     node --version; \
     npm --version
 
-# Cache helper script for MinIO-backed caching (zstd compressed).
+# Cache helper (zstd-compressed directory trees in the CI object store), and
+# the S3 client it speaks through: s3.sh, byte-identical to .ci/scripts/s3.sh in
+# every Keploy repo (docker-build.yml checks the copies and the hash). Not on
+# PATH on purpose: lanes use their repo's own copy, versioned with the lane.
 COPY minio-cache /usr/local/bin/minio-cache
-RUN chmod +x /usr/local/bin/minio-cache
+COPY s3.sh /usr/local/lib/keploy-ci/s3.sh
+RUN chmod +x /usr/local/bin/minio-cache /usr/local/lib/keploy-ci/s3.sh

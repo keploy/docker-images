@@ -153,6 +153,8 @@ RUN set -eux; \
     kubectl version --client; \
     helm version --short
 
-# Cache helper script for MinIO-backed npm/Go caching.
+# Cache helper for npm/Go caching in the CI object store, and the S3 client it
+# speaks through (s3.sh, the shared copy; see keploy-ci-node/Dockerfile).
 COPY minio-cache /usr/local/bin/minio-cache
-RUN chmod +x /usr/local/bin/minio-cache
+COPY s3.sh /usr/local/lib/keploy-ci/s3.sh
+RUN chmod +x /usr/local/bin/minio-cache /usr/local/lib/keploy-ci/s3.sh
