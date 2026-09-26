@@ -33,7 +33,7 @@
 # publish.yml now passes BASE_TAG=<version being published>, so a derived image
 # always sits on the base from the SAME release. The default below is only for a
 # bare `docker build` outside CI.
-ARG BASE_TAG=1.2.36
+ARG BASE_TAG=1.2.40
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 # ── STANDARD Kubernetes tool versions ─────────────────────────────────────────
 # Single source of truth for every consuming lane. keploy-ci-playwright pins the

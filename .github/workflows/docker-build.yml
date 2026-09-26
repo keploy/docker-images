@@ -5,12 +5,14 @@ on:
     paths:
       - 'keploy-ci*/**'
       - .github/workflows/docker-build.yml
+      - .github/workflows/publish.yml
   push:
     branches:
       - main
     paths:
       - 'keploy-ci*/**'
       - .github/workflows/docker-build.yml
+      - .github/workflows/publish.yml
   workflow_dispatch:
 
 jobs:
@@ -211,6 +213,78 @@ jobs:
           grep -q 'BASE_TAG=node-' .github/workflows/publish.yml \
             || { echo "::error::publish.yml never passes a node- prefixed BASE_TAG"; fail=1; }
           exit "$fail"
+
+      # The ARG defaults are what a bare local `docker build` and the
+      # derived-images matrix below build on. Before 1.2.40 every base shipped
+      # MinIO's mc, so a default older than that quietly puts mc back in the
+      # image this PR tests while the published one has none.
+      - name: BASE_TAG defaults name an mc-less base
+        run: |
+          set -eu
+          floor=1.2.40
+          fail=0
+          for d in keploy-ci-node keploy-ci-java keploy-ci-python keploy-ci-kube \
+                   keploy-ci-playwright keploy-ci-lighthouse; do
+            def=$(sed -n 's/^ARG BASE_TAG=//p' "$d/Dockerfile")
+            case "$d" in
+              keploy-ci-playwright|keploy-ci-lighthouse) want_prefix=node- ;;
+              *) want_prefix= ;;
+            esac
+            ver=${def#"$want_prefix"}
+            if [ -n "$want_prefix" ] && [ "$ver" = "$def" ]; then
+              echo "::error::$d/Dockerfile: BASE_TAG default '$def' must be a node- tag (tier 3 builds FROM node)"; fail=1; continue
+            fi
+            if ! printf '%s' "$ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::$d/Dockerfile: BASE_TAG default '$def' is not ${want_prefix}X.Y.Z"; fail=1; continue
+            fi
+            if [ "$(printf '%s\n%s\n' "$floor" "$ver" | sort -V | head -n1)" != "$floor" ]; then
+              echo "::error::$d/Dockerfile: BASE_TAG default '$def' predates $floor, whose base still ships mc"; fail=1
+            fi
+          done
+          exit "$fail"
+
+      # metadata-action's default flavor is latest=auto, which adds a bare
+      # `latest` to EVERY type=semver rule regardless of its pattern prefix. With
+      # no flavor set, each leg of each publish job pushed `latest` and the last
+      # to finish won (at v1.2.40 it was playwright). Only the base leg may.
+      #
+      # The check parses publish.yml with PyYAML. A pinned interpreter and a
+      # pinned PyYAML, rather than whatever the runner image's system python3
+      # happens to carry: a missing module there would red every PR here.
+      - name: Set up Python for the publish.yml check
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Only the base image may publish a bare latest
+        run: |
+          python -m pip install --quiet --disable-pip-version-check "pyyaml==6.0.2"
+          python - <<'PY'
+          import sys, yaml
+          wf = yaml.safe_load(open(".github/workflows/publish.yml"))
+          # Split so the runner does not evaluate it as an expression here.
+          base_expr = "latest=$" + "{{ matrix.tag-prefix == '' && 'auto' || 'false' }}"
+          errors, seen = [], 0
+          for name, job in wf["jobs"].items():
+              for step in job.get("steps", []):
+                  if not str(step.get("uses", "")).startswith("docker/metadata-action@"):
+                      continue
+                  seen += 1
+                  flavor = str((step.get("with") or {}).get("flavor", "")).strip()
+                  prefixes = [leg.get("tag-prefix") for leg in job["strategy"]["matrix"]["include"]]
+                  if "" in prefixes:
+                      ok = flavor == base_expr and prefixes.count("") == 1
+                  else:
+                      ok = flavor == "latest=false"
+                  if not ok:
+                      errors.append(f"{name}: metadata-action flavor is {flavor!r}; want "
+                                    + (repr(base_expr) if "" in prefixes else "'latest=false'"))
+          if seen != 4:
+              errors.append(f"expected 4 metadata-action steps in publish.yml, found {seen}")
+          for e in errors:
+              print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+          PY
 
       # Deliberately NOT setup-buildx-action. That action makes a
       # docker-container builder the default, and that driver resolves `FROM`

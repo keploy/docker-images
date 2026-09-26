@@ -18,7 +18,7 @@
 # from the first release built with this change. So a bare local `docker build`
 # of this image reproduces the old behaviour until then; CI always overrides
 # BASE_TAG with the version being published.
-ARG BASE_TAG=node-1.2.32
+ARG BASE_TAG=node-1.2.40
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 # Ship the current cache helper and its S3 client rather than inherit them: a
 # base node tag older than this release carries a minio-cache that speaks

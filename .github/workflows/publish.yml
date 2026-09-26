@@ -70,6 +70,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # The bare `latest` comes from flavor, NOT from the raw rule below
+          # (that one needs is_default_branch, false on tag and release refs).
+          # flavor's default is latest=auto, which tags `latest` for every
+          # type=semver rule whatever its pattern prefix, so every leg of every
+          # job used to push a bare `latest` and the last to finish won: at
+          # v1.2.40 `latest` was the amd64-only playwright image. Only the base
+          # leg (empty prefix) may own it; every other leg and job sets false.
+          flavor: latest=${{ matrix.tag-prefix == '' && 'auto' || 'false' }}
           tags: |
             type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
             type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
@@ -133,7 +141,8 @@ jobs:
         # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
         # and executes if interpolated.
         #
-        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
+        # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
         # below is gated on is_default_branch, which is false for tag and release
         # refs). Falling back would publish an image tagged with this release
@@ -152,6 +161,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Never a bare `latest` from this job: that tag is the base image's,
+          # set by base-images. See the note there.
+          flavor: latest=false
           tags: |
             type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
             type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
@@ -228,7 +240,8 @@ jobs:
         # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
         # and executes if interpolated.
         #
-        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
+        # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
         # below is gated on is_default_branch, which is false for tag and release
         # refs). Falling back would publish an image tagged with this release
@@ -247,6 +260,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Never a bare `latest` from this job: that tag is the base image's,
+          # set by base-images. See the note there.
+          flavor: latest=false
           tags: |
             type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
             type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
@@ -320,7 +336,8 @@ jobs:
         # Keploy CI lane pulls. `v1.0.0';touch$IFS/tmp/x;'` is a VALID tag name
         # and executes if interpolated.
         #
-        # No `latest` fallback: keploy-ci:latest is two Go majors behind the base
+        # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
+        # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
         # below is gated on is_default_branch, which is false for tag and release
         # refs). Falling back would publish an image tagged with this release
@@ -339,6 +356,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # Never a bare `latest` from this job: that tag is the base image's,
+          # set by base-images. See the note there.
+          flavor: latest=false
           tags: |
             type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
             type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
