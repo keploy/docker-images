@@ -14,11 +14,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ── Stage 0: the minio-cache helper is duplicated per build context (Docker
-  # cannot COPY outside a context). Drift between copies is how the ILM
-  # rule-spam regression shipped, so fail fast when they diverge.
+  # ── Stage 0: the minio-cache helper and the s3.sh client it speaks through
+  # are duplicated per build context (Docker cannot COPY outside a context).
+  # Drift between copies is how the ILM rule-spam regression shipped, so fail
+  # fast when they diverge.
   helper-parity:
-    name: "minio-cache copies identical"
+    name: "minio-cache / s3.sh copies identical, no mc"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -34,6 +35,76 @@ jobs:
             diff -u "$canonical" "$f" || status=1
           done
           exit $status
+
+      # s3.sh is the one S3 client every Keploy repo carries as
+      # .ci/scripts/s3.sh (scripts/ci/s3.sh in k8s-proxy), byte-identical
+      # everywhere. The copies here must be that exact file: change it in every
+      # repo at once, then move this hash.
+      - name: Every baked s3.sh is the shared copy
+        run: |
+          set -eu
+          want=0ad1be42cad01a41fc7d3ec2fc55eb0fe9b41cf0c797febd335418560a2b0249
+          status=0
+          n=0
+          for f in $(git ls-files '*/s3.sh'); do
+            n=$((n + 1))
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            [ "$got" = "$want" ] || { echo "::error::$f sha256 $got, want the shared copy's $want"; status=1; }
+          done
+          # Every context that ships minio-cache must ship s3.sh beside it.
+          for f in $(git ls-files '*/minio-cache'); do
+            [ -f "$(dirname "$f")/s3.sh" ] || { echo "::error::$(dirname "$f") ships minio-cache without s3.sh"; status=1; }
+            grep -q 'COPY s3.sh /usr/local/lib/keploy-ci/s3.sh' "$(dirname "$f")/Dockerfile" \
+              || { echo "::error::$(dirname "$f")/Dockerfile does not install s3.sh where minio-cache looks for it"; status=1; }
+          done
+          [ "$n" -gt 0 ] || { echo "::error::no s3.sh copies found"; status=1; }
+          # s3-test.sh (the suite the live step runs against the baked s3.sh) is
+          # the shared copy too: the client and its suite move together.
+          want_test=3928658f71ecbac1e4b10c5258c828f2b5f9378ec9cd4be0e00646bfa74bc825
+          nt=0
+          for f in $(git ls-files '*/s3-test.sh'); do
+            nt=$((nt + 1))
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            [ "$got" = "$want_test" ] || { echo "::error::$f sha256 $got, want the shared copy's $want_test"; status=1; }
+          done
+          [ "$nt" -gt 0 ] || { echo "::error::no s3-test.sh copy found"; status=1; }
+          exit $status
+
+      # MinIO withdrew its distribution (dl.min.io answers 410 Gone, the Docker
+      # Hub images are gone) and the CI store is SeaweedFS, reached over S3 with
+      # s3.sh. No image here may install, fetch or call MinIO's mc again, and no
+      # helper may write a bucket lifecycle rule (locked on the store).
+      - name: No MinIO client, no lifecycle writes
+        run: |
+          set -eu
+          files=$(git ls-files 'keploy-ci*/Dockerfile' '*/minio-cache' '*.sh' | grep -v '/s3.sh$' | grep -v '/s3-test.sh$')
+          # Comment lines are allowed to mention the history. The client in every
+          # form: by name (mc, or the Alpine package's mcli), by any path ending
+          # in one of those, through a variable named for it, with global flags
+          # before the subcommand; a variable given the client; its install,
+          # download or probe; and lifecycle writes. (minio-cache itself is this
+          # repo's helper, so running it is not flagged here.)
+          start='(^|[[:space:];&|(!{`'"'"'"=])'
+          flags='[[:space:]]+(--?[[:alnum:]_-]+([= ][^[:space:]]+)?[[:space:]]+)*'
+          subw='alias|cp|cat|stat|ls|mb|rb|rm|mv|mirror|find|share|pipe|admin|ilm|head|tag|od|du|diff|sql|version|ready|anonymous|policy|retention|event|replicate|encrypt|legalhold|undo|watch|tree|support|license|update|config|idp|quota|batch|get|put|ping'
+          sub='('"$subw"'|"\$@"|\$@|"\$\*")([[:space:];)'"'"'"]|$)'
+          # \mc (skips shell aliases) is the same call; so is an argv list
+          # (["mc", "cp", ...] / spawn('mc', ['cp', ...])).
+          q='["'"'"']'
+          argv="$q"'([^"'"'"'[:space:]]*/)?(mc|mcli)'"$q"'[[:space:]]*,[[:space:]]*\[?[[:space:]]*('"$q"'--?[[:alnum:]_-]+(=[^"'"'"']*)?'"$q"'[[:space:]]*,[[:space:]]*)*'"$q"'('"$subw"')'"$q"
+          call="$start"'\\?([^[:space:];&|()<>'"'"'"`]*/)?(mc|mcli)["'"'"']?'"$flags$sub|$start"'"?\$\{?[A-Za-z_]*(mc|MC)(_[A-Z]+)?\}?"?'"$flags$sub|$argv"
+          assign='(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=["'"'"']?([^[:space:]"'"'"'=;]*/)?(mc|mcli)([[:space:]]+--?[[:alnum:]_-]+)*["'"'"']?([[:space:];&|]|$)'
+          # Any MinIO download host, the Alpine/Debian package, the Homebrew
+          # formula or tap, a probe, MC_CONFIG_DIR or an MC_HOST_<alias> credential.
+          install='minio/mc([^[:alnum:]_]|$)|dl\.min\.io|(^|[^[:alnum:]_-])minio-client([^[:alnum:]_-]|$)|/bin/mc(li)?([^[:alnum:]_-]|$)|command -v mc(li)?([^[:alnum:]_]|$)|which mc(li)?([^[:alnum:]_]|$)|MC_CONFIG_DIR|(^|[^[:alnum:]_-])minio-mc([^[:alnum:]_-]|$)|minio/stable/mc([^[:alnum:]_]|$)|dl\.minio\.(io|org\.cn)|(^|[^[:alnum:]_])MC_HOST_[[:alnum:]_]'
+          lifecycle='put-bucket-lifecycle|[?&]lifecycle([=&[:space:]]|$)'
+          hits=$(grep -nE -- "$call|$assign|$install|$lifecycle" $files \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::MinIO's mc (or a lifecycle write) is back; the CI store is reached with s3.sh"
+            exit 1
+          fi
 
   # ── Stage 1: base images (no cross-image deps) ─────────────────────
   base-images:
@@ -154,6 +225,93 @@ jobs:
           docker build -t ghcr.io/keploy/keploy-ci:pr-threading-test ./keploy-ci
           docker build --build-arg BASE_TAG=pr-threading-test \
             -t keploy-ci-node:pr-threading-test ./keploy-ci-node
+
+      - name: No mc in the base or the derived image; node carries the shared s3.sh
+        run: |
+          set -eu
+          for img in ghcr.io/keploy/keploy-ci:pr-threading-test keploy-ci-node:pr-threading-test; do
+            if docker run --rm --entrypoint sh "$img" -c 'command -v mc || command -v mcli || [ -e /usr/local/bin/mc ]'; then
+              echo "::error::$img still ships MinIO's mc"; exit 1
+            fi
+          done
+          got=$(docker run --rm --entrypoint sha256sum keploy-ci-node:pr-threading-test /usr/local/lib/keploy-ci/s3.sh | cut -d' ' -f1)
+          [ "$got" = 0ad1be42cad01a41fc7d3ec2fc55eb0fe9b41cf0c797febd335418560a2b0249 ] \
+            || { echo "::error::node's /usr/local/lib/keploy-ci/s3.sh is not the shared copy ($got)"; exit 1; }
+
+      # minio-cache and s3.sh inside the image the lanes run, against the CI
+      # store's server: SeaweedFS 4.47, digest-pinned exactly as keploy/k8s-proxy's
+      # chart pins it. `mini -dir=/data` is the image's own default command,
+      # spelled out: master, volume, filer and S3 on :8333 in one process, with
+      # S3 auth on because the credentials are set (not secrets; nothing else
+      # can reach it).
+      - name: minio-cache and s3.sh against SeaweedFS 4.47
+        env:
+          SEAWEEDFS_IMAGE: docker.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+        run: |
+          set -eu
+          docker network create s3net
+          # The server's own log is the first thing to read when any check fails.
+          trap 'rc=$?; [ "$rc" -eq 0 ] || docker logs --tail 80 seaweedfs 2>&1 || true; docker rm -f seaweedfs >/dev/null 2>&1 || true; docker network rm s3net >/dev/null 2>&1 || true' EXIT
+          docker run -d --name seaweedfs --network s3net \
+            -e AWS_ACCESS_KEY_ID=docker-images-ci -e AWS_SECRET_ACCESS_KEY=docker-images-ci-not-a-secret \
+            -e WEED_MASTER_VOLUME_GROWTH_COPY_1=1 "$SEAWEEDFS_IMAGE" mini -dir=/data
+          run() {
+            docker run --rm --network s3net -v "$PWD/keploy-ci-node:/t:ro" \
+              -e MINIO_ENDPOINT=http://seaweedfs:8333 -e MINIO_ACCESS_KEY=docker-images-ci \
+              -e MINIO_SECRET_KEY=docker-images-ci-not-a-secret -e S3_TEST_BUCKET=woodpecker \
+              --entrypoint sh keploy-ci-node:pr-threading-test -c "$1"
+          }
+          run 'i=0; until curl -sf -o /dev/null http://seaweedfs:8333/healthz; do i=$((i+1)); [ $i -lt 120 ] || { echo "SeaweedFS not healthy after 120 s"; exit 1; }; sleep 1; done'
+          # The shared client's own suite, live, in this image (its curl, its sh),
+          # against the image's INSTALLED copy: s3-test.sh tests the s3.sh beside
+          # it, so it is dropped next to /usr/local/lib/keploy-ci/s3.sh.
+          run 'cp /t/s3-test.sh /usr/local/lib/keploy-ci/ && S3_TEST_LIVE=1 S3_TEST_LARGE_MB=64 sh /usr/local/lib/keploy-ci/s3-test.sh'
+          # minio-cache round trip through the image's own copies.
+          run 'set -eu
+            mkdir -p /root/cachetest/sub && head -c 3000000 /dev/urandom > /root/cachetest/sub/blob
+            want=$(md5sum < /root/cachetest/sub/blob)
+            CACHE_PATHS=/root/cachetest:/root/does-not-exist minio-cache save ci-roundtrip
+            rm -rf /root/cachetest
+            CACHE_PATHS=/root/cachetest minio-cache restore ci-roundtrip
+            [ "$(md5sum < /root/cachetest/sub/blob)" = "$want" ] || { echo "restored bytes differ"; exit 1; }
+            out=$(CACHE_PATHS=/root/cachetest minio-cache restore absent-key) || { echo "a miss did not exit 0"; exit 1; }
+            case "$out" in *"cold start"*) ;; *) echo "a miss was not reported as a cold start: $out"; exit 1 ;; esac
+            if MINIO_SECRET_KEY=wrong CACHE_PATHS=/root/cachetest minio-cache save ci-roundtrip; then
+              echo "a save the store refused reported success"; exit 1
+            fi
+            # A stream that does not arrive whole never unpacks as a whole cache:
+            # the object is rewritten with one byte changed but the MD5 the
+            # writer declared, so s3.sh streams its first 1 MiB ranges and
+            # withholds the last. tar has started on /root/cachetest by then;
+            # the restore removes that directory, says so, is a cold start, and
+            # leaves alone a cache directory the stream never reached.
+            S3=/usr/local/lib/keploy-ci/s3.sh
+            sh "$S3" get woodpecker/caches/ci-roundtrip.tar.zst /tmp/good.zst
+            good=$(md5sum < /tmp/good.zst | cut -d" " -f1); cp /tmp/good.zst /tmp/bad.zst
+            printf Z | dd of=/tmp/bad.zst bs=1 seek=100 conv=notrunc 2>/dev/null
+            curl -sf -o /dev/null -T /tmp/bad.zst --aws-sigv4 aws:amz:us-east-1:s3 -u "$MINIO_ACCESS_KEY:$MINIO_SECRET_KEY" \
+              -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" -H "x-amz-meta-s3sh-md5: $good" \
+              "$MINIO_ENDPOINT/woodpecker/caches/ci-roundtrip.tar.zst"
+            mkdir -p /root/cachetest /root/untouched && echo stale > /root/cachetest/stale && echo baked > /root/untouched/f
+            out=$(S3_PART_BYTES=1048576 CACHE_PATHS=/root/cachetest:/root/untouched minio-cache restore ci-roundtrip 2>&1) \
+              || { echo "a corrupt cache failed the lane: $out"; exit 1; }
+            case "$out" in *"s3.sh exit 6"*"removed the partly unpacked /root/cachetest;"*) ;; *) echo "a corrupt cache was not reported as one, with what was removed: $out"; exit 1 ;; esac
+            [ ! -e /root/cachetest ] || { echo "a stream that did not arrive whole left a cache behind"; exit 1; }
+            [ "$(cat /root/untouched/f)" = baked ] || { echo "a cache directory the stream never reached was removed"; exit 1; }
+            # A store that cannot answer unpacks nothing, so it removes nothing:
+            # what the image had there (browsers baked into a cache path) stays.
+            mkdir -p /root/cachetest && echo baked > /root/cachetest/f
+            out=$(MINIO_ENDPOINT=http://127.0.0.1:9 S3_RETRIES=2 S3_RETRY_DELAY=0 S3_CONNECT_TIMEOUT=2 \
+              CACHE_PATHS=/root/cachetest minio-cache restore ci-roundtrip 2>&1) || { echo "an unreachable store failed the lane: $out"; exit 1; }
+            case "$out" in *"s3.sh exit 5"*"nothing had been unpacked; the cache directories are as they were"*) ;; *) echo "an unreachable store was not reported as one: $out"; exit 1 ;; esac
+            [ "$(cat /root/cachetest/f)" = baked ] || { echo "an unreachable store removed a cache it never unpacked into"; exit 1; }
+            rm -rf /root/cachetest
+            # Without the baked copy it falls back to the s3.sh beside it (the
+            # repo checkout), and a set CDPATH must not corrupt that path.
+            rm /usr/local/lib/keploy-ci/s3.sh
+            out=$(CDPATH=/ CACHE_PATHS=/root/cachetest sh /t/minio-cache restore absent-key) || { echo "fallback lookup failed"; exit 1; }
+            case "$out" in *"cold start"*) ;; *) echo "fallback lookup did not reach the store: $out"; exit 1 ;; esac
+            echo "minio-cache: save/restore/miss/refused/corrupt/unreachable all behave"'
 
       - name: The derived image must carry the base's Go, not a stale one
         run: |

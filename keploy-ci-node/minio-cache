@@ -1,20 +1,25 @@
 #!/usr/bin/env sh
-# minio-cache — Save and restore CI caches via MinIO.
+# minio-cache — Save and restore CI caches via the CI object store.
+#
+# (The name is historical: the store behind MINIO_ENDPOINT is SeaweedFS since
+# 2026-09-25, and this speaks plain S3 to it through s3.sh, installed next to it
+# at /usr/local/lib/keploy-ci/s3.sh — the same client every Keploy repo carries
+# as .ci/scripts/s3.sh. MinIO's `mc` is no longer in these images.)
 #
 # Usage:
-#   minio-cache restore <cache-key>   # Download & unpack if available
+#   minio-cache restore <cache-key>   # Stream, verify & unpack if available
 #   minio-cache save    <cache-key>   # Pack & upload
 #
 # Required environment variables:
 #   MINIO_ENDPOINT   – e.g. http://192.168.116.165:9001
 #   MINIO_ACCESS_KEY – e.g. keploy
 #   MINIO_SECRET_KEY – (from secret)
-#   CACHE_BUCKET     – defaults to $BUCKET or "woodpecker"
+#   CACHE_BUCKET     – defaults to $BUCKET or "woodpecker"; must already exist
 #   CACHE_PATHS      – colon-separated list of directories to cache
 #                       e.g. "/root/.npm:/root/go/pkg/mod"
 #
 # The <cache-key> argument is used as the object name inside the bucket's
-# "caches/" prefix.  Typical keys:
+# "caches/" prefix (expired server-side after 30 days).  Typical keys:
 #   npm-<hash>      – node_modules / npm cache
 #   gomod-<hash>    – Go module cache
 #
@@ -26,12 +31,43 @@
 #   # After build, save it back
 #   minio-cache save "npm-${REPO_NAME}"
 #
+# What each side guarantees:
+#   restore  Streamed, as the old `mc cat | tar -x` was, so the archive never
+#            lands on disk, but through `s3.sh cat`: every byte range is checked
+#            before tar sees it, and the last one only once the whole object's
+#            MD5 matches, so a corrupt or cut stream never unpacks as a whole
+#            cache. It is all or nothing: if the stream or tar fails partway,
+#            every CACHE_PATHS directory tar had started unpacking into is
+#            removed again (an absent cache is a cold start; half of one is a
+#            broken build). A failure before tar unpacked anything (a store
+#            that is down, or times out before the first byte) touches nothing:
+#            what the directories held before (e.g. browsers baked into
+#            /root/.cache/ms-playwright) stays. A miss is a cold start
+#            (exit 0). A store that cannot deliver the object is reported
+#            loudly on stderr and is also a cold start (exit 0), as it always
+#            was for this helper: callers in several repos run it without
+#            `|| true`. A failed extract of a verified stream (e.g. a full disk)
+#            still exits non-zero, as the old `mc cat | tar -x` did. The whole
+#            restore is capped at S3_OP_TIMEOUT (600 s): a store that is slow
+#            but alive means a cold start, not a stalled lane.
+#   save     The archive is written to a temp file and uploaded as ONE object
+#            (Content-MD5 on every request, read back; over 5 GiB a verified
+#            multipart upload): the object is replaced whole or not at all. A
+#            failed upload exits non-zero (as a failed `mc pipe` did; the old
+#            `tar | mc pipe` could also publish a truncated archive when tar
+#            died mid-stream, which this cannot).
+#   disk     restore needs no scratch space beyond s3.sh's in-flight ranges
+#            (128 MiB); save needs the compressed archive's size free in
+#            ${TMPDIR:-/tmp}.
+#   buckets  Never created here (no `mc mb`): a new bucket on the store gets no
+#            retention. Lifecycle rules are locked on the store (retention is
+#            server-side); CI never writes one.
+#
 set -eu
 
 ACTION="${1:-}"
 CACHE_KEY="${2:-}"
 BUCKET="${CACHE_BUCKET:-${BUCKET:-woodpecker}}"
-ALIAS="cache_mc"
 PREFIX="caches"
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
@@ -41,32 +77,87 @@ info() { echo "[minio-cache] $*"; }
 
 # Validate env
 for v in MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY; do
-  eval val=\$$v
+  eval "val=\${$v:-}"
   [ -n "$val" ] || die "Environment variable $v is required"
 done
 
 [ -n "${CACHE_PATHS:-}" ] || die "CACHE_PATHS must be set (colon-separated directories)"
 
-# Configure mc alias (idempotent)
-mc alias set "$ALIAS" "$MINIO_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null 2>&1
-mc mb -p "${ALIAS}/${BUCKET}" >/dev/null 2>&1 || true
+# The image's hash-checked copy; else the one beside this script (a checkout
+# of this repo, e.g. docker-build.yml's tests). CDPATH='' and -P keep `cd` from
+# printing a directory into the path.
+S3=/usr/local/lib/keploy-ci/s3.sh
+[ -r "$S3" ] || S3="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)/s3.sh"
+[ -r "$S3" ] || die "s3.sh not found at /usr/local/lib/keploy-ci/s3.sh or next to $0"
 
-OBJECT="${ALIAS}/${BUCKET}/${PREFIX}/${CACHE_KEY}.tar.zst"
+OBJECT="${BUCKET}/${PREFIX}/${CACHE_KEY}.tar.zst"
+TMP=
+cleanup() { [ -z "$TMP" ] || rm -f "$TMP" "$TMP.tar" "$TMP.list"; }
+# Undo a restore that failed partway: remove each CACHE_PATHS directory that
+# tar unpacked at least one member into (read-only module-cache dirs
+# included), per tar's own listing ($TMP.list, `tar -v`: a member is listed
+# before its bytes are written), and leave the others exactly as they were.
+# Sets UNDONE to what the log should say.
+undo_partial() {
+  OLDIFS="$IFS"; IFS=":"
+  # shellcheck disable=SC2086 # split CACHE_PATHS on ':' on purpose
+  set -- $CACHE_PATHS
+  IFS="$OLDIFS"
+  removed=
+  for d in "$@"; do
+    rel=${d#/}; rel=${rel%/}
+    awk -v p="$rel" '$0 == p || $0 == p "/" || index($0, p "/") == 1 { found = 1; exit } END { exit !found }' "$TMP.list" || continue
+    if [ -e "$d" ]; then
+      chmod -R u+w "$d" 2>/dev/null || true
+      rm -rf "$d"
+    fi
+    removed="$removed $d"
+  done
+  if [ -n "$removed" ]; then
+    UNDONE="removed the partly unpacked$removed"
+  elif [ -s "$TMP.list" ]; then
+    UNDONE="unpacked only outside CACHE_PATHS; removed nothing"
+  else
+    UNDONE="nothing had been unpacked; the cache directories are as they were"
+  fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 case "$ACTION" in
   restore)
-    if mc stat "$OBJECT" >/dev/null 2>&1; then
-      info "Restoring cache: $CACHE_KEY"
-      mc cat "$OBJECT" | tar --zstd -xf - -C /
-      info "Cache restored successfully"
-    else
-      info "No cache found for key: $CACHE_KEY (cold start)"
-    fi
+    # s3.sh's exit code comes back through a file: a POSIX pipeline reports
+    # only tar's.
+    TMP=$(mktemp "${TMPDIR:-/tmp}/minio-cache.XXXXXXXX")
+    info "Restoring cache: $CACHE_KEY"
+    trc=0
+    { rc=0; S3_OP_TIMEOUT="${S3_OP_TIMEOUT:-600}" sh "$S3" cat "$OBJECT" || rc=$?; echo "$rc" > "$TMP"; } \
+      | tar --zstd -xvf - -C / > "$TMP.list" 2>"$TMP.tar" || trc=$?
+    rc=$(cat "$TMP")
+    case "$rc" in
+      0)
+        if [ "$trc" -ne 0 ]; then
+          sed 's/^/[minio-cache]   tar: /' "$TMP.tar" >&2
+          undo_partial
+          die "unpacking $CACHE_KEY failed (tar exit $trc) after a verified download; $UNDONE"
+        fi
+        info "Cache restored successfully (streamed, verified)"
+        ;;
+      3)
+        info "No cache found for key: $CACHE_KEY (cold start)"
+        ;;
+      *)
+        undo_partial
+        echo "WARNING: [minio-cache] the object store could not deliver $OBJECT whole (s3.sh exit $rc, above); $UNDONE; continuing without the cache (cold start)" >&2
+        ;;
+    esac
     ;;
 
   save)
     # Convert colon-separated paths to space-separated, skip missing dirs
     DIRS=""
+    # shellcheck disable=SC2086 # split CACHE_PATHS on ':' on purpose
     OLDIFS="$IFS"; IFS=":"; set -- $CACHE_PATHS; IFS="$OLDIFS"
     for d in "$@"; do
       [ -d "$d" ] && DIRS="$DIRS $d"
@@ -78,11 +169,12 @@ case "$ACTION" in
     fi
 
     info "Saving cache: $CACHE_KEY (paths:$DIRS)"
-    tar --zstd -cf - $DIRS | mc pipe "$OBJECT"
-
-    # NOTE: MinIO lifecycle/retention is managed server-side (canonical rule set on the MinIO instance).
-    # Do NOT add lifecycle rules from CI - the add command is NOT idempotent; each call appends a
-    # duplicate rule and the bucket hit MinIO's 1000-rule cap, breaking retention (2026-08-13 incident).
+    TMP=$(mktemp "${TMPDIR:-/tmp}/minio-cache.XXXXXXXX")
+    # shellcheck disable=SC2086 # DIRS is a space-separated list of existing dirs
+    tar --zstd -cf "$TMP" $DIRS
+    rc=0
+    sh "$S3" put "$TMP" "$OBJECT" || rc=$?
+    [ "$rc" -eq 0 ] || die "cache upload of $OBJECT failed (s3.sh exit $rc, above)"
     info "Cache saved successfully"
     ;;
 

@@ -1,4 +1,4 @@
-# keploy-ci-go-build: Go + MinGW cross-compilers + MinIO client
+# keploy-ci-go-build: Go + MinGW cross-compilers
 # Used by: go-test.yml download-and-build, prepare-and-run.yml build-and-upload-keploy
 FROM golang:1.27-bookworm
 
@@ -15,10 +15,7 @@ RUN set -eux; \
         zstd \
         pigz \
     ; \
-    rm -rf /var/lib/apt/lists/*; \
-    # Install MinIO client
-    MC_RELEASE=RELEASE.2025-08-13T08-35-41Z; \
-    curl -fsSL "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-amd64.${MC_RELEASE}" \
-      -o /usr/local/bin/mc; \
-    echo "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891  /usr/local/bin/mc" | sha256sum -c -; \
-    chmod +x /usr/local/bin/mc
+    rm -rf /var/lib/apt/lists/*
+# No MinIO client: the CI object store is SeaweedFS, reached through the repos'
+# own .ci/scripts/s3.sh over the curl in golang:*-bookworm (7.88.1, which s3.sh
+# supports; see keploy-ci/Dockerfile).

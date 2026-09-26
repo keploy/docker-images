@@ -11,7 +11,7 @@ A Docker-in-Docker image with Go and common CI dependencies for running Keploy t
 **Features:**
 - Based on `docker:26.1-dind` (includes dockerd, docker CLI, buildx, containerd, runc)
 - Go 1.25.0 with CGO enabled
-- Common CI utilities (bash, curl, git, jq, etc.)
+- Common CI utilities (bash, curl, git, jq, etc.); no MinIO client (see below)
 - Build dependencies for CGO builds (build-base, linux-headers)
 - Helper script `start-docker` to start Docker daemon inside containers
 
@@ -50,6 +50,35 @@ image: ghcr.io/keploy/keploy-ci:kube-1.2.36
 ```
 
 Tag: `ghcr.io/keploy/keploy-ci:kube-<version>`.
+
+## The CI object store: s3.sh, not `mc`
+
+None of these images ships MinIO's `mc` any more. The CI store behind
+`MINIO_ENDPOINT` is SeaweedFS (it replaced MinIO on 2026-09-25; the Woodpecker
+secrets keep their `MINIO_*` names), and MinIO withdrew its distribution
+(dl.min.io answers 410 Gone, the Docker Hub images are gone), so a baked `mc` was
+a binary nobody could rebuild from upstream.
+
+Lanes reach the store through their own repo's `.ci/scripts/s3.sh`
+(`scripts/ci/s3.sh` in k8s-proxy): a POSIX-sh S3 client over the `curl` every
+image here already has (curl >= 7.75; `go-build` ships 7.88.1, the rest 8.x).
+It is versioned and tested with the lanes that call it, so it is not on `PATH`
+in these images.
+
+The one image-owned user of the store is `minio-cache` (node, playwright,
+lighthouse; the name is historical). It speaks through the same `s3.sh`,
+installed beside it at `/usr/local/lib/keploy-ci/s3.sh` and byte-identical to the
+repos' copies (`docker-build.yml` checks every copy against the shared hash and
+runs both against a SeaweedFS 4.47 container in the freshly built node image):
+
+- `restore` downloads the object and verifies it (size, and MD5 where the ETag is
+  one) **before** `tar` sees a byte; a miss or an unreachable store is a cold
+  start (exit 0), the latter reported on stderr.
+- `save` uploads with one PUT (Content-MD5, read back), so an object is replaced
+  whole or not at all; a failed upload exits non-zero. Caches are limited to
+  5 GiB, S3's single-PUT limit.
+- It never creates a bucket (a new bucket on the store gets no retention) and
+  never writes a lifecycle rule (they are locked; retention is server-side).
 
 ## Image tiers and the `BASE_TAG` arg
 

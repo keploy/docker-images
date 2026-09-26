@@ -20,10 +20,13 @@
 # BASE_TAG with the version being published.
 ARG BASE_TAG=node-1.2.32
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
-# The base node image pins a pre-fix tag whose baked minio-cache appended a MinIO
-# ILM rule on every cache save; ship the current helper so it cannot be inherited.
+# Ship the current cache helper and its S3 client rather than inherit them: a
+# base node tag older than this release carries a minio-cache that speaks
+# through MinIO's mc (gone from these images) and, older still, one that
+# appended a MinIO ILM rule on every save.
 COPY minio-cache /usr/local/bin/minio-cache
-RUN chmod +x /usr/local/bin/minio-cache
+COPY s3.sh /usr/local/lib/keploy-ci/s3.sh
+RUN chmod +x /usr/local/bin/minio-cache /usr/local/lib/keploy-ci/s3.sh
 
 ENV DEBIAN_FRONTEND=noninteractive
 

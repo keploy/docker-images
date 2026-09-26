@@ -6,8 +6,8 @@
 # enterprise DaemonSet lanes) each downloaded kind+kubectl+helm+yq from the
 # public internet on every run (k8s-proxy: scripts/ci/install-tools.sh; ~73 MiB
 # per lane, a WAN dependency that flakes lanes). This bakes them once, on top of
-# the shared keploy-ci base (which already carries Go, the docker CLI, mc and the
-# common CI utils), so those lanes drop install-tools.sh and their `apk add`
+# the shared keploy-ci base (which already carries Go, the docker CLI, curl and
+# the common CI utils), so those lanes drop install-tools.sh and their `apk add`
 # churn entirely.
 #
 # This is intentionally LEAN — it does NOT descend from keploy-ci-node, so it
