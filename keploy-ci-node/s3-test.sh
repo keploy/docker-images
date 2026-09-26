@@ -120,10 +120,14 @@ cat > "$BIN/curl" <<EOF
 #!/bin/sh
 ST="$ST"
 if [ "\${1:-}" = --version ]; then echo "curl \${STUB_CURL_VERSION:-8.14.1} (x86_64-pc-linux-gnu) stub"; exit 0; fi
-# Parallel range requests arrive at once: take the plan line under a lock.
-until mkdir "\$ST/lock" 2>/dev/null; do sleep 0.01 2>/dev/null || sleep 1; done
-n=\$(cat "\$ST/n" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "\$ST/n"
-rmdir "\$ST/lock"
+# Parallel range requests arrive at once: each takes the next plan line by
+# creating the lowest-numbered claim directory still free (mkdir is atomic).
+# No lock: s3.sh TERMs its in-flight fetches after a failure, and a request
+# killed while holding a lock left it behind, so the next case hung forever.
+# Starting at the last claim seen only skips slots that are already taken.
+n=\$(cat "\$ST/hint" 2>/dev/null || echo 0); n=\$((\${n:-0} + 1))
+until mkdir "\$ST/req.\$n" 2>/dev/null; do n=\$((n + 1)); done
+echo "\$n" > "\$ST/hint"
 printf '%s\n' "\$*" >> "\$ST/argv.log"
 cat >> "\$ST/stdin.log"
 hdr=; out=; method=GET; url=; up=; headers=; range=; post=
@@ -206,7 +210,8 @@ chmod +x "$BIN/curl"
 
 SECRET='s3cr3t"with\quote'
 plan() { : > "$ST/plan"; for l in "$@"; do printf '%s\n' "$l" >> "$ST/plan"; done
-         rm -f "$ST/n" "$ST/calls.log" "$ST/argv.log" "$ST/stdin.log" "$ST/uploaded" "$ST/uploaded.all" "$ST/posted"; }
+         rm -f "$ST/hint" "$ST/calls.log" "$ST/argv.log" "$ST/stdin.log" "$ST/uploaded" "$ST/uploaded.all" "$ST/posted"
+         rm -rf "$ST"/req.*; }
 ncalls() { [ -f "$ST/calls.log" ] && wc -l < "$ST/calls.log" | tr -d ' ' || echo 0; }
 # s3 VERB ARGS... — the script under test against the stub, no real sleeps.
 # One-stream downloads unless PARALLEL says otherwise: the cases below count
