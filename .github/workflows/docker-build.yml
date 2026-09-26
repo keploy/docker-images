@@ -58,6 +58,16 @@ jobs:
               || { echo "::error::$(dirname "$f")/Dockerfile does not install s3.sh where minio-cache looks for it"; status=1; }
           done
           [ "$n" -gt 0 ] || { echo "::error::no s3.sh copies found"; status=1; }
+          # s3-test.sh (the suite the live step runs against the baked s3.sh) is
+          # the shared copy too: the client and its suite move together.
+          want_test=50d48fd6f2feb9843bc82380b3aad8a4f4746367c6b808e71fa751e303fa51f4
+          nt=0
+          for f in $(git ls-files '*/s3-test.sh'); do
+            nt=$((nt + 1))
+            got=$(sha256sum "$f" | cut -d' ' -f1)
+            [ "$got" = "$want_test" ] || { echo "::error::$f sha256 $got, want the shared copy's $want_test"; status=1; }
+          done
+          [ "$nt" -gt 0 ] || { echo "::error::no s3-test.sh copy found"; status=1; }
           exit $status
 
       # MinIO withdrew its distribution (dl.min.io answers 410 Gone, the Docker
@@ -76,10 +86,17 @@ jobs:
           # repo's helper, so running it is not flagged here.)
           start='(^|[[:space:];&|(!{`'"'"'"=])'
           flags='[[:space:]]+(--?[[:alnum:]_-]+([= ][^[:space:]]+)?[[:space:]]+)*'
-          sub='(alias|cp|cat|stat|ls|mb|rb|rm|mv|mirror|find|share|pipe|admin|ilm|head|tag|od|du|diff|sql|version|ready|anonymous|policy|retention|event|replicate|encrypt|legalhold|undo|watch|tree|support|license|update|config|idp|quota|batch|get|put|ping|"\$@"|\$@)([[:space:];)'"'"'"]|$)'
-          call="$start"'([^[:space:];&|()<>'"'"'"`]*/)?(mc|mcli)["'"'"']?'"$flags$sub|$start"'"?\$\{?[A-Za-z_]*(mc|MC)(_[A-Z]+)?\}?"?'"$flags$sub"
+          subw='alias|cp|cat|stat|ls|mb|rb|rm|mv|mirror|find|share|pipe|admin|ilm|head|tag|od|du|diff|sql|version|ready|anonymous|policy|retention|event|replicate|encrypt|legalhold|undo|watch|tree|support|license|update|config|idp|quota|batch|get|put|ping'
+          sub='('"$subw"'|"\$@"|\$@|"\$\*")([[:space:];)'"'"'"]|$)'
+          # \mc (skips shell aliases) is the same call; so is an argv list
+          # (["mc", "cp", ...] / spawn('mc', ['cp', ...])).
+          q='["'"'"']'
+          argv="$q"'([^"'"'"'[:space:]]*/)?(mc|mcli)'"$q"'[[:space:]]*,[[:space:]]*\[?[[:space:]]*('"$q"'--?[[:alnum:]_-]+(=[^"'"'"']*)?'"$q"'[[:space:]]*,[[:space:]]*)*'"$q"'('"$subw"')'"$q"
+          call="$start"'\\?([^[:space:];&|()<>'"'"'"`]*/)?(mc|mcli)["'"'"']?'"$flags$sub|$start"'"?\$\{?[A-Za-z_]*(mc|MC)(_[A-Z]+)?\}?"?'"$flags$sub|$argv"
           assign='(^|[[:space:];&|(])[A-Za-z_][A-Za-z0-9_]*=["'"'"']?([^[:space:]"'"'"'=;]*/)?(mc|mcli)([[:space:]]+--?[[:alnum:]_-]+)*["'"'"']?([[:space:];&|]|$)'
-          install='minio/mc([^[:alnum:]_]|$)|dl\.min\.io|(^|[^[:alnum:]_-])minio-client([^[:alnum:]_-]|$)|/bin/mc(li)?([^[:alnum:]_-]|$)|command -v mc(li)?([^[:alnum:]_]|$)|which mc(li)?([^[:alnum:]_]|$)|MC_CONFIG_DIR'
+          # Any MinIO download host, the Alpine/Debian package, the Homebrew
+          # formula or tap, a probe, MC_CONFIG_DIR or an MC_HOST_<alias> credential.
+          install='minio/mc([^[:alnum:]_]|$)|dl\.min\.io|(^|[^[:alnum:]_-])minio-client([^[:alnum:]_-]|$)|/bin/mc(li)?([^[:alnum:]_-]|$)|command -v mc(li)?([^[:alnum:]_]|$)|which mc(li)?([^[:alnum:]_]|$)|MC_CONFIG_DIR|(^|[^[:alnum:]_-])minio-mc([^[:alnum:]_-]|$)|minio/stable/mc([^[:alnum:]_]|$)|dl\.minio\.(io|org\.cn)|(^|[^[:alnum:]_])MC_HOST_[[:alnum:]_]'
           lifecycle='put-bucket-lifecycle|[?&]lifecycle([=&[:space:]]|$)'
           hits=$(grep -nE -- "$call|$assign|$install|$lifecycle" $files \
             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
