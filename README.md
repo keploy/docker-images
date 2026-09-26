@@ -9,17 +9,19 @@ This repository contains Docker images used by Keploy for CI/CD pipelines.
 A Docker-in-Docker image with Go and common CI dependencies for running Keploy tests in CI pipelines.
 
 **Features:**
-- Based on `docker:26.1-dind` (includes dockerd, docker CLI, buildx, containerd, runc)
-- Go 1.25.0 with CGO enabled
-- Common CI utilities (bash, curl, git, jq, etc.); no MinIO client (see below)
-- Build dependencies for CGO builds (build-base, linux-headers)
+- Based on `debian:trixie-slim`, with Docker Engine 29.1 from Docker's apt
+  repository (dockerd, docker CLI, buildx, compose, containerd)
+- Go 1.27.0; no C toolchain (Linux builds use `CGO_ENABLED=0`; Windows
+  cross-compiles use `keploy-ci-go-build`)
+- Common CI utilities (bash, curl, git, jq, sudo, zstd, etc.); no MinIO client
+  (see below)
 - Helper script `start-docker` to start Docker daemon inside containers
 
 **Usage:**
 ```yaml
-# Example in GitHub Actions
+# Example in GitHub Actions. Pin a release, never `latest` (see Publishing).
 container:
-  image: ghcr.io/keploy/keploy-ci:latest
+  image: ghcr.io/keploy/keploy-ci:1.2.40
   options: --privileged
 ```
 
@@ -46,7 +48,7 @@ lanes use a sibling dind.
 
 ```yaml
 # Woodpecker step, talking to a sibling docker:dind service
-image: ghcr.io/keploy/keploy-ci:kube-1.2.36
+image: ghcr.io/keploy/keploy-ci:kube-1.2.40
 ```
 
 Tag: `ghcr.io/keploy/keploy-ci:kube-<version>`.
@@ -121,8 +123,15 @@ Tags follow semantic versioning:
 - `v1.0.0` → `1.0.0`, `1.0`, `1` for every image, prefixed per variant
   (`node-1.0.0`, `playwright-1.0.0`, …)
 
-There is **no `<prefix>-latest`**. The `latest` tag rule is
+There is **no `<prefix>-latest`**. The `<prefix>latest` tag rule is
 `enable={{is_default_branch}}`, which is false on the tag and release refs this
-workflow runs on, so only the bare `latest` on the base image has ever been
-produced — and it is stale. Pin a full `X.Y.Z` tag; every consuming repo already
-does.
+workflow runs on, so it never fires.
+
+The bare `latest` comes from somewhere else: `metadata-action`'s `flavor`, whose
+default `latest=auto` adds `latest` to every `type=semver` rule whatever its
+pattern prefix. Until `publish.yml` set the flavor explicitly, every leg of
+every job pushed a bare `latest` and the last to finish won; at v1.2.40 it was
+the amd64-only playwright image. Now only the base leg publishes it
+(`latest=auto`) and every other leg sets `latest=false`, which `docker-build.yml`
+checks. A `latest` pulled before the first release after that fix is still
+the wrong image. Pin a full `X.Y.Z` tag; every consuming repo does.

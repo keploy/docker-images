@@ -20,7 +20,7 @@
 # from the first release built with this change. So a bare local `docker build`
 # of this image reproduces the old behaviour until then; CI always overrides
 # BASE_TAG with the version being published.
-ARG BASE_TAG=node-1.2.32
+ARG BASE_TAG=node-1.2.40
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 ARG MONGO_TOOLS_VERSION=100.10.0
 

@@ -14,7 +14,7 @@
 # publish.yml now passes BASE_TAG=<version being published>, so a derived image
 # always sits on the base from the SAME release. The default below is only for a
 # bare `docker build` outside CI.
-ARG BASE_TAG=1.2.32
+ARG BASE_TAG=1.2.40
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; \
