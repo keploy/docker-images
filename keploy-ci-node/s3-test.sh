@@ -101,7 +101,8 @@ got=$(vec http://h k s 20130524T000000Z s3_uriencode 'a/b')
 # A --range request against a 200 line is answered 206 with that slice, unless:
 #   norange=1  answer 200 with the whole body (a store that ignores Range)
 #   r412=1     answer 412 (the object changed since the If-Match ETag)
-#   bad=START  flip the first byte of the range that starts at START
+#   bad=START  corrupt the first byte of the range that starts at START (a
+#              byte other than the one there, whatever the random data holds)
 #   badlen=START    answer that range one byte short, and say so in Content-Length
 #   lie=START       answer that range one byte short, claiming the full length
 #   append=1        after taking an upload, append a byte to the local file
@@ -166,7 +167,12 @@ done
 [ -z "\$post" ] || cp "\$post" "\$ST/posted"
 [ -z "\$up" ] || [ -z "\$append" ] || printf X >> "\$up"
 [ -z "\$grow" ] || printf X >> "\$grow"
-[ -z "\$flip" ] || printf Z | dd of="\${flip%@*}" bs=1 seek="\${flip#*@}" conv=notrunc 2>/dev/null
+if [ -n "\$flip" ]; then
+  # A byte other than the one there: the random data holds a Z one time in 256.
+  # Compared by value: a NUL or newline would not survive \$(...) as a byte.
+  fc=Z; [ "\$(tail -c +\$((\${flip#*@} + 1)) "\${flip%@*}" | head -c 1 | od -An -tu1 | tr -d ' ')" != 90 ] || fc=Y
+  printf %s "\$fc" | dd of="\${flip%@*}" bs=1 seek="\${flip#*@}" conv=notrunc 2>/dev/null
+fi
 [ -z "\$slp" ] || sleep "\$slp"
 [ "\$etag" != auto ] || etag=\$(md5sum < "\$body" | cut -d' ' -f1)
 [ "\$etag" != up ] || etag=\$(md5sum < "\$up" | cut -d' ' -f1)
@@ -185,7 +191,10 @@ if [ -n "\$range" ] && [ "\$status" = 200 ] && [ -z "\$norange" ]; then
   # The range goes where curl was told: stdout (get's dd) or a file (cat).
   emit() { if [ -n "\$out" ] && [ "\$out" != - ]; then cat > "\$out"; else cat; fi; }
   if [ "\$a" = "\$bad" ]; then
-    { printf X; tail -c +\$((a + 2)) "\$body" | head -c \$((b - a)); } | emit
+    # A byte other than the one there: the random data holds an X one time in
+    # 256, and the range would then go out whole (pipeline 10085).
+    bc=X; [ "\$(tail -c +\$((a + 1)) "\$body" | head -c 1 | od -An -tu1 | tr -d ' ')" != 88 ] || bc=Y
+    { printf %s "\$bc"; tail -c +\$((a + 2)) "\$body" | head -c \$((b - a)); } | emit
   else
     tail -c +\$((a + 1)) "\$body" | head -c "\$send" | emit
   fi
@@ -630,9 +639,13 @@ mps put "$T/mpsrc" woodpecker/a/mp; rc=$?
   && grep -q "2621448 bytes in 3 parts, MD5 $(md5sum < "$T/mpgrown" | cut -d' ' -f1) verified" "$T/err" \
   && pass "put multipart: a file that grows mid-upload is caught, the upload aborted and sent again as it is now" \
   || fail "put multipart grow: rc=$rc calls=$(cat "$ST/calls.log") err=$(cat "$T/err")"
-cp "$T/mpf" "$T/mpsrc"; cp "$T/mpf" "$T/mpflip"; printf Z | dd of="$T/mpflip" bs=1 seek=2200000 conv=notrunc 2>/dev/null
+cp "$T/mpf" "$T/mpsrc"; cp "$T/mpf" "$T/mpflip"
+# The byte the stub's flip= writes there: Z, or Y where the random data has a Z.
+FLIPAT=2200000
+fc=Z; [ "$(tail -c +$((FLIPAT + 1)) "$T/mpf" | head -c 1 | od -An -tu1 | tr -d ' ')" != 90 ] || fc=Y
+printf %s "$fc" | dd of="$T/mpflip" bs=1 seek=$FLIPAT conv=notrunc 2>/dev/null
 WANTFLIP=$(mp_want "$T/mpflip")
-plan "0 200 $T/mpinit.xml" "0 200 - etag=up flip=$T/mpsrc@2200000" "0 200 - etag=up" "0 200 - etag=up" "0 204 -" \
+plan "0 200 $T/mpinit.xml" "0 200 - etag=up flip=$T/mpsrc@$FLIPAT" "0 200 - etag=up" "0 200 - etag=up" "0 204 -" \
   "0 200 $T/mpinit.xml" "0 200 - etag=up" "0 200 - etag=up" "0 200 - etag=up" "0 200 -" \
   "0 200 $T/mpflip etag=$WANTFLIP meta=auto"
 mps put "$T/mpsrc" woodpecker/a/mp; rc=$?
