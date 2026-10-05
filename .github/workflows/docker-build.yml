@@ -62,7 +62,7 @@ jobs:
           [ "$n" -gt 0 ] || { echo "::error::no s3.sh copies found"; status=1; }
           # s3-test.sh (the suite the live step runs against the baked s3.sh) is
           # the shared copy too: the client and its suite move together.
-          want_test=b3596d5245259d5008e74d2aff68a3d34726ffde3458cc3b01394eb9d3a2ad72
+          want_test=de21838cf744fb72ce39982b1e8f623964b0bf7377a090a5d510f88e0926ba2f
           nt=0
           for f in $(git ls-files '*/s3-test.sh'); do
             nt=$((nt + 1))

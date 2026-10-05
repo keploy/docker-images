@@ -382,9 +382,17 @@ PART=1500000 PARALLEL=4 PARALLEL_MIN=1 s3 get woodpecker/a/big "$T/dl/big2"; rc=
   || fail "get ranged part rounding: rc=$rc calls=$(cat "$ST/calls.log")"
 plan "0 200 $T/big etag=auto" "0 403 -"
 PARALLEL=2 PARALLEL_MIN=1 s3 get woodpecker/a/big "$T/dl/big2w403"; rc=$?
-[ "$rc" -eq 4 ] && [ "$(ncalls)" -eq 3 ] && [ ! -e "$T/dl/big2w403" ] && no_temps "$T/dl" \
-  && pass "get large: a failed part stops the workers starting more (2 workers, 4 parts: 2 requests, exit 4)" \
-  || fail "get ranged abort: rc=$rc calls=$(ncalls)"
+# ncalls is 3 (HEAD + both initial workers' part GETs) OR 2 (HEAD + one): the two
+# workers start concurrently, and whether the second reads its part before the
+# first's 403 sets $S3_ABORT (checked at s3_get_worker's loop top) is a race. The
+# guarantee under test is that a failed part stops MORE parts from starting — i.e.
+# no beyond-the-initial-batch part ever runs, so ncalls never reaches 4. Asserting
+# exactly 3 made this flaky (CI saw 2); assert the real guarantee: 2 <= ncalls <= 3,
+# exit 4, nothing written.
+c=$(ncalls)
+[ "$rc" -eq 4 ] && [ "$c" -ge 2 ] && [ "$c" -le 3 ] && [ ! -e "$T/dl/big2w403" ] && no_temps "$T/dl" \
+  && pass "get large: a failed part stops the workers starting more (2 workers, 4 parts: HEAD + 1-2 part GETs then abort, exit 4)" \
+  || fail "get ranged abort: rc=$rc calls=$c"
 plan "0 200 $T/obj etag=auto"
 PARALLEL=4 s3 get woodpecker/a/obj "$T/dl/small"; rc=$?
 [ "$rc" -eq 0 ] && cmp -s "$T/obj" "$T/dl/small" && [ "$(ncalls)" -eq 2 ] && ! grep -q Range "$ST/calls.log" \
