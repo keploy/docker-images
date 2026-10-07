@@ -17,7 +17,7 @@
 ARG BASE_TAG=1.2.40
 FROM ghcr.io/keploy/keploy-ci:${BASE_TAG}
 RUN set -eux; \
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://deb.nodesource.com/setup_24.x | bash -; \
     apt-get install -y --no-install-recommends nodejs zstd; \
     rm -rf /var/lib/apt/lists/*; \
     node --version; \
