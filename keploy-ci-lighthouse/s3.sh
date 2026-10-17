@@ -35,6 +35,8 @@
 #   4  the store refused the credentials or the request (401/403)
 #   5  transport or server failure that outlasted every retry (or S3_OP_TIMEOUT)
 #   6  integrity failure (size/checksum mismatch) that outlasted every retry
+#   129 / 130 / 141 / 143  stopped by SIGHUP / SIGINT / SIGPIPE / SIGTERM, once
+#      it has stopped what it started and removed its temp files
 #
 # What every transfer guarantees, so a lane gets either the complete verified
 # bytes or a loud failure:
@@ -78,9 +80,23 @@
 #   when it moves less than S3_LOW_SPEED_LIMIT bytes/s for S3_LOW_SPEED_TIME
 #   seconds). A per-attempt ceiling (S3_MAX_TIME) is the last resort only; it
 #   is sized so a slow but moving multi-GiB transfer is never cut off.
-#   S3_OP_TIMEOUT bounds the whole command, retries and backoff included (for
-#   cat, the reader's time too): set it where the caller has a fallback, so a
-#   store that is slow but alive cannot hold a lane.
+#   S3_OP_TIMEOUT bounds the time the command makes no progress. Progress is
+#   a request the store answered in full: a 2xx, and every byte of it arrived
+#   (curl exit 0); for cat, also the reader taking a range. Each one starts
+#   S3_OP_TIMEOUT again, and its time starts at the command's first request,
+#   so local work before it (reading stdin, hashing the file) is not counted.
+#   Past it no request starts, and none waits longer than what is left to
+#   connect: a store that drops connections ends at S3_OP_TIMEOUT, and one
+#   that accepts them and never answers at S3_OP_TIMEOUT plus the stall
+#   window (S3_LOW_SPEED_TIME). A transfer that moves is never cut: neither
+#   the stall window nor --max-time (S3_MAX_TIME) is shortened, and stall
+#   detection watches it, so a large object on a loaded runner is not given
+#   up while it arrives. Set it where the caller has a fallback, so a store
+#   that is not answering cannot hold a lane.
+#   It does not bound the command's total time; S3_RETRIES bounds each
+#   request, by count. A store that fails most attempts but answers each
+#   request within its retries is moving, and a command of many requests (a
+#   large cat, a long ls) can then take long.
 #
 # Configuration (the same Woodpecker secrets the lanes had for mc):
 #   MINIO_ENDPOINT     http(s)://host[:port]; without a scheme, MINIO_USE_SSL
@@ -105,7 +121,7 @@
 #   S3_CONNECT_TIMEOUT seconds (10)
 #   S3_LOW_SPEED_LIMIT / S3_LOW_SPEED_TIME   stall detection (32 KiB/s, 60 s)
 #   S3_MAX_TIME        per-attempt ceiling in seconds, 0 = none (3600)
-#   S3_OP_TIMEOUT      the whole command, in seconds, 0 = none (0)
+#   S3_OP_TIMEOUT      seconds the command may go without progress, 0 = none (0)
 #   S3_MAX_PUT_BYTES   largest single PUT (5 GiB); larger goes multipart
 #   S3_PUT_PART_BYTES  multipart part size (256 MiB, whole MiB, raised to keep
 #                      within 10000 parts); one part at a time is on disk
@@ -168,38 +184,78 @@ s3_truthy() { case "$1" in [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Oo][Nn]) return 0 ;;
 # Newline-separated, so a destination directory with spaces in its name
 # still gets its temp file removed.
 S3_TMPFILES=
+# No read here or on the rest of the exit path: BusyBox 1.38's read spins
+# forever when it runs from a trap handler, and this is one. The loop runs in
+# a subshell, so a signal handled while it runs (the EXIT trap runs it too)
+# finds the shell's IFS and globbing as they were.
 s3_cleanup() {
   [ -n "$S3_TMPFILES" ] || return 0
-  printf '%s\n' "$S3_TMPFILES" | while IFS= read -r _s3_f; do
-    [ -z "$_s3_f" ] || rm -f "$_s3_f" 2>/dev/null || true
-  done
+  (
+    IFS='
+'
+    set -f
+    for _s3_f in $S3_TMPFILES; do
+      [ -z "$_s3_f" ] || rm -f "$_s3_f" 2>/dev/null || true
+    done
+  )
 }
 s3_register() { S3_TMPFILES="$S3_TMPFILES
 $1"; }
-# Background work (a download's byte ranges, the stream hashers) is stopped on
-# a signal, whole process trees (a part is a curl | dd pipeline), before the
-# temp files go, so none of it re-creates a file after the cleanup. An
-# unfinished multipart upload is aborted.
+# Background work (a download's byte ranges, the stream hashers) is recorded
+# as it starts, with s3_track, and stopped as whole process trees (a part is a
+# curl | dd pipeline) before the temp files go, so none of it re-creates a
+# file after the cleanup. Only what s3.sh started: a caller whose shell execs
+# s3.sh hands it that shell's own background jobs, which are not s3.sh's.
 S3_PART_PIDS=
+S3_TRACKED=
+s3_track() { S3_PART_PIDS="$S3_PART_PIDS $1"; S3_TRACKED=$1; }
 s3_kill_tree() {
-  if command -v pgrep >/dev/null 2>&1; then
-    for _s3_c in $(pgrep -P "$1" 2>/dev/null); do s3_kill_tree "$_s3_c"; done
-  fi
+  # Stopped first: a stopped process cannot fork, so a part that is about to
+  # start its next curl cannot do it between its children being listed and
+  # its own TERM, which it takes when it is continued.
+  kill -STOP "$1" 2>/dev/null || true
+  for _s3_c in $(s3_children "$1"); do s3_kill_tree "$_s3_c"; done
   kill -TERM "$1" 2>/dev/null || true
+  kill -CONT "$1" 2>/dev/null || true
+}
+# s3_children PID: the pids whose parent is PID, from /proc, which every Linux
+# has (procps, and pgrep with it, is not in every image). Each process's
+# status file has its parent on a "PPid:" line; its name, which the process
+# sets, is on a line of its own with any newline in it escaped, so no name can
+# forge another line. grep -l reads every file and prints the names of those
+# that match, going on past one whose process was reaped while it ran (GNU sed
+# and BusyBox awk stop at the first file they cannot read).
+s3_children() {
+  LC_ALL=C grep -l "^PPid:[[:space:]]*$1\$" /proc/[0-9]*/status 2>/dev/null \
+    | sed -n 's|^/proc/\([0-9][0-9]*\)/status$|\1|p'
 }
 s3_stop_parts() {
-  for _s3_p in $S3_PART_PIDS; do s3_kill_tree "$_s3_p"; done
+  # A signal between a part's `&` and its s3_track finds the part in $!: the
+  # newest background job is the only one that can be unrecorded.
+  [ -z "${!:-}" ] || [ "$!" = "$S3_TRACKED" ] || s3_stop_part "$!"
+  for _s3_p in $S3_PART_PIDS; do s3_stop_part "$_s3_p"; done
   S3_PART_PIDS=
+}
+# A part that ended before it was waited for may have been reaped by the shell
+# already, and its pid given to another process since: only a process that is
+# still this shell's child is signalled.
+s3_stop_part() {
+  ! grep -q "^PPid:[[:space:]]*$$\$" "/proc/$1/status" 2>/dev/null || s3_kill_tree "$1"
 }
 s3_forget_pid() { # $1 = a pid that has been waited for: never signal it again
   _s3_l=; for _s3_p in $S3_PART_PIDS; do [ "$_s3_p" = "$1" ] || _s3_l="$_s3_l $_s3_p"; done
   S3_PART_PIDS=$_s3_l
 }
-s3_on_signal() { s3_stop_parts; s3_mp_abort; s3_cleanup; exit "$1"; }
-trap 's3_cleanup' EXIT
-trap 's3_on_signal 130' INT
-trap 's3_on_signal 143' TERM
-trap 's3_on_signal 129' HUP
+# Every way out goes through s3_finish: a command that finished (everything
+# it started has been waited for and forgotten, and no upload is open, so
+# only the temp files go), one that failed or hit set -e in the middle, and a
+# signal. PIPE is one: a lane that pipes s3.sh's log into a reader that stops
+# early has s3.sh take it at its next log line, perhaps a retry's, with ranges
+# in flight. An unfinished multipart upload is aborted.
+s3_finish() { s3_stop_parts; s3_mp_abort; s3_cleanup; }
+# The EXIT trap is cleared first, so a second signal while s3_finish runs
+# finishes the work again instead of cutting it short. Both are set in main.
+s3_on_signal() { trap - EXIT; s3_finish; exit "$1"; }
 
 # s3_mktemp VAR DIR: create a temp file in DIR, store its path in VAR and
 # register it for cleanup. Not `VAR=$(s3_mktemp)`: a command substitution is a
@@ -440,30 +496,65 @@ s3_split() {
 
 s3_now() { date +%s; }
 
+# Progress: a request the store answered in full starts S3_OP_TIMEOUT again.
+# Background range workers make requests too, so the time of the last answer
+# is kept in a file every process of the command reads (S3_PROGRESS). Every
+# writer goes through the one .new name (one name to clean up): a reader that
+# comes between one writer's write and another's rename can find the file
+# empty, which s3_deadline_now reads as no news, and the next answer writes
+# it again.
+S3_PROGRESS=
+s3_progress() {
+  [ -n "$S3_PROGRESS" ] || return 0
+  s3_now > "$S3_PROGRESS.new" 2>/dev/null && mv -f "$S3_PROGRESS.new" "$S3_PROGRESS" 2>/dev/null || true
+}
+# s3_deadline_now: S3_DEADLINE moved to S3_OP_TIMEOUT after the last progress.
+s3_deadline_now() {
+  [ "$S3_DEADLINE" -gt 0 ] && [ -n "$S3_PROGRESS" ] || return 0
+  _s3_last=$(cat "$S3_PROGRESS" 2>/dev/null) || return 0
+  case $_s3_last in ''|*[!0-9]*) return 0 ;; esac
+  [ $(( _s3_last + S3_OP_TIMEOUT )) -le "$S3_DEADLINE" ] || S3_DEADLINE=$(( _s3_last + S3_OP_TIMEOUT ))
+}
+
 # s3_curl OUTFILE HDRFILE [curl args...]: one request, body to OUTFILE ("-"
 # for stdout), response headers to HDRFILE. Returns curl's exit code; the HTTP
 # status is read back from HDRFILE with s3_status. The credentials go to curl
 # as a config on stdin, so they never appear in argv. Past the S3_OP_TIMEOUT
-# deadline no request is made (curl's timeout code, 28, is returned), and
-# before it --max-time is cut to what is left.
+# deadline no request is made (curl's timeout code, 28, is returned); before
+# it the connect timeout is cut to what is left, a time the store has not
+# answered in. Nothing that bounds a transfer is: a transfer that moves is not
+# cut, the stall window (S3_LOW_SPEED_TIME) watches it, and S3_MAX_TIME is its
+# only ceiling. An answer that arrives in full (a 2xx, curl exit 0) is
+# progress, and starts S3_OP_TIMEOUT again (s3_progress); none is counted with
+# no deadline set (S3_DEADLINE=0: no S3_OP_TIMEOUT, or a multipart upload's
+# abort on the way out).
 s3_curl() {
   _s3_out=$1; _s3_hdr=$2; shift 2
   : > "$_s3_hdr"
   _s3_mt=$S3_MAX_TIME
+  _s3_ct=$S3_CONNECT_TIMEOUT
   if [ "$S3_DEADLINE" -gt 0 ]; then
+    # The first request starts the clock: what came before it was local.
+    if [ -n "$S3_PROGRESS" ] && [ ! -s "$S3_PROGRESS" ]; then s3_progress; fi
+    s3_deadline_now
     _s3_left=$(( S3_DEADLINE - $(s3_now) ))
     [ "$_s3_left" -gt 0 ] || return 28
-    if [ "$_s3_mt" -eq 0 ] || [ "$_s3_left" -lt "$_s3_mt" ]; then _s3_mt=$_s3_left; fi
+    if [ "$_s3_left" -lt "$_s3_ct" ]; then _s3_ct=$_s3_left; fi
   fi
   set -- --config - --silent --show-error --globoff \
     --aws-sigv4 "aws:amz:$S3_REGION:s3" \
-    --connect-timeout "$S3_CONNECT_TIMEOUT" \
+    --connect-timeout "$_s3_ct" \
     --speed-limit "$S3_LOW_SPEED_LIMIT" --speed-time "$S3_LOW_SPEED_TIME" \
     --output "$_s3_out" --dump-header "$_s3_hdr" "$@"
   if [ "$_s3_mt" -gt 0 ]; then set -- --max-time "$_s3_mt" "$@"; fi
   if s3_truthy "$S3_TLS_INSECURE"; then set -- --insecure "$@"; fi
   if [ -n "$S3_CA_FILE" ]; then set -- --cacert "$S3_CA_FILE" "$@"; fi
-  printf 'user = "%s"\n' "$S3_CURL_USER" | curl "$@"
+  _s3_crc=0
+  printf 'user = "%s"\n' "$S3_CURL_USER" | curl "$@" || _s3_crc=$?
+  if [ "$_s3_crc" -eq 0 ] && [ "$S3_DEADLINE" -gt 0 ] && [ -n "$S3_PROGRESS" ]; then
+    case $(s3_status "$_s3_hdr") in 2??) s3_progress ;; esac
+  fi
+  return "$_s3_crc"
 }
 
 # The status of the last response in a header dump (a 100 Continue precedes
@@ -536,8 +627,9 @@ s3_retry_wait() {
     return 1
   fi
   _s3_wait=$(s3_backoff "$2")
+  s3_deadline_now
   if [ "$S3_DEADLINE" -gt 0 ] && [ $(( $(s3_now) + _s3_wait )) -ge "$S3_DEADLINE" ]; then
-    s3_log "$1: gave up after $2 attempt(s), S3_OP_TIMEOUT=${S3_OP_TIMEOUT}s reached: $S3_WHY"
+    s3_log "$1: gave up after $2 attempt(s), S3_OP_TIMEOUT=${S3_OP_TIMEOUT}s reached without progress before the next retry: $S3_WHY"
     return 1
   fi
   s3_log "$1: attempt $2/$S3_RETRIES failed ($S3_WHY); retrying in ${_s3_wait}s"
@@ -706,7 +798,7 @@ s3_put_once() {
 
 # ---------------------------------------------------------- multipart put
 # For a file over S3_MAX_PUT_BYTES. The upload id lives in S3_MP_ID until the
-# object is complete, so a failure or a signal aborts it.
+# object is complete, so any way out before then aborts it (s3_finish).
 # (The S3_MP_* file variables are set by s3_mktemp, through eval.)
 S3_MP_ID=
 # shellcheck disable=SC2153
@@ -797,8 +889,7 @@ s3_mp_once() {
   rm -f "$S3_MP_FIFO"
   mkfifo "$S3_MP_FIFO" || { s3_mp_abort; s3_log "$_s3m_desc: mkfifo failed"; return 1; }
   md5sum < "$S3_MP_FIFO" > "$S3_MP_SUMF" &
-  _s3m_hpid=$!
-  S3_PART_PIDS="$S3_PART_PIDS $_s3m_hpid"
+  s3_track $!; _s3m_hpid=$!
   exec 8> "$S3_MP_FIFO"
   : > "$S3_MP_MD5S"
   printf '<CompleteMultipartUpload>' > "$S3_MP_XML"
@@ -969,7 +1060,7 @@ s3_get_ranged() {
   _s3_i=0
   while [ "$_s3_i" -lt "$S3_PARALLEL" ] && [ "$_s3_i" -lt "$_s3_n" ]; do
     s3_get_worker "$_s3_i" "$_s3_n" "$_s3_psz" "$_s3_size" &
-    S3_PART_PIDS="$S3_PART_PIDS $!"
+    s3_track $!
     _s3_i=$(( _s3_i + 1 ))
   done
   wait
@@ -1112,8 +1203,8 @@ s3_cat_start() { # $1 = range index, fetched in the background
   s3_register "$S3_CAT_BASE.$1"; s3_register "$S3_HDR.$1"; s3_register "$S3_RCF.$1"
   rm -f "$S3_RCF.$1"
   s3_cat_fetch "$1" > /dev/null 7>&- 8>&- &
+  s3_track $!
   eval "S3_CAT_PID_$1=\$!"
-  S3_PART_PIDS="$S3_PART_PIDS $!"
 }
 
 s3_cat_wait() { # $1 = range index
@@ -1171,7 +1262,7 @@ s3_cat_once() { # one pass over the object HEAD described; sets S3_CLASS
     rm -f "$S3_CAT_FIFO"
     if ! mkfifo "$S3_CAT_FIFO"; then S3_CLASS=fatal; S3_WHY="mkfifo failed"; return 0; fi
     md5sum < "$S3_CAT_FIFO" > "$S3_SUMF" &
-    S3_CAT_HPID=$!
+    s3_track $!; S3_CAT_HPID=$!
     exec 7> "$S3_CAT_FIFO"
   fi
   _s3c_next=0; _s3c_i=0
@@ -1209,7 +1300,7 @@ s3_cat_once() { # one pass over the object HEAD described; sets S3_CLASS
       if ! cat "$_s3c_part" >&7; then S3_CLASS=fatal; S3_WHY="hashing the stream failed"; s3_cat_stop; return 0; fi
       exec 7>&-
       wait "$S3_CAT_HPID" 2>/dev/null || true
-      S3_CAT_HPID=
+      s3_forget_pid "$S3_CAT_HPID"; S3_CAT_HPID=
       _s3c_md5=$(cut -d' ' -f1 < "$S3_SUMF")
       if [ "$_s3c_md5" != "$S3_CAT_WANT" ]; then
         S3_CLASS=integrity
@@ -1229,6 +1320,11 @@ s3_cat_once() { # one pass over the object HEAD described; sets S3_CLASS
       S3_CLASS=fatal; S3_WHY="writing to stdout failed after $S3_CAT_OUT bytes (the reader went away?)"; s3_cat_stop; return 0
     fi
     S3_CAT_OUT=$(( S3_CAT_OUT + S3_CAT_LEN ))
+    # The reader took the range: that is progress too. The next range starts
+    # only now, so a slow reader (the caller's docker load or tar) would
+    # otherwise use up S3_OP_TIMEOUT and be taken for a store that does not
+    # answer.
+    s3_progress
     rm -f "$_s3c_part"
     _s3c_i=$(( _s3c_i + 1 ))
   done
@@ -1237,7 +1333,7 @@ s3_cat_once() { # one pass over the object HEAD described; sets S3_CLASS
     # An empty object: nothing went through the hasher.
     exec 7>&-
     wait "$S3_CAT_HPID" 2>/dev/null || true
-    S3_CAT_HPID=
+    s3_forget_pid "$S3_CAT_HPID"; S3_CAT_HPID=
     _s3c_md5=$(cut -d' ' -f1 < "$S3_SUMF")
     if [ "$_s3c_md5" != "$S3_CAT_WANT" ]; then
       S3_CLASS=integrity; S3_WHY="the object's MD5 is $_s3c_md5, want $S3_CAT_WANT ($S3_WANT_FROM)"; return 0
@@ -1371,6 +1467,9 @@ cmd_ls() {
   _s3_prefix=${2:-}
   s3_mktemp S3_HDR "${TMPDIR:-/tmp}"; s3_mktemp S3_BODY "${TMPDIR:-/tmp}"
   _s3_token=
+  # Every token the store has handed back, one per line.
+  _s3_seen='
+'
   while :; do
     # Parameters in canonical (sorted) order, each value encoded once, so the
     # URL curl sends is already the SigV4 canonical query string.
@@ -1392,8 +1491,19 @@ cmd_ls() {
       $1 == "Key" && inc { k = unesc($2); if (k !~ /\/$/) print k }'
     _s3_trunc=$(tr -d '\r\n' < "$S3_BODY" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')
     [ "$_s3_trunc" = true ] || break
-    _s3_token=$(s3_xml_field "$S3_BODY" NextContinuationToken)
-    [ -n "$_s3_token" ] || s3_die 1 "ls: truncated listing without a continuation token"
+    _s3_next=$(s3_xml_field "$S3_BODY" NextContinuationToken)
+    [ -n "$_s3_next" ] || s3_die 1 "ls: truncated listing without a continuation token"
+    # A listing advances by its token. Each page is progress (S3_OP_TIMEOUT),
+    # so a store that hands back a token it handed back before, in a cycle of
+    # any length, would be listed forever.
+    case $_s3_seen in
+      *"
+$_s3_next
+"*) s3_die 1 "ls: the store handed back a continuation token it had already sent; the listing does not advance" ;;
+    esac
+    _s3_seen="$_s3_seen$_s3_next
+"
+    _s3_token=$_s3_next
   done
 }
 
@@ -1478,6 +1588,14 @@ if [ -n "${S3_SH_SOURCE_ONLY:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
+# Here, once everything s3_finish calls is defined, and not in a sourced copy,
+# where $$ is the test's own shell.
+trap 's3_finish' EXIT
+trap 's3_on_signal 129' HUP
+trap 's3_on_signal 130' INT
+trap 's3_on_signal 141' PIPE
+trap 's3_on_signal 143' TERM
+
 [ $# -ge 1 ] || s3_usage
 _s3_verb=$1; shift
 case "$_s3_verb" in
@@ -1488,7 +1606,14 @@ esac
 # presign signs locally, unless S3_REGION=auto has to ask the store.
 if [ "$_s3_verb" != presign ] || [ "$S3_REGION" = auto ]; then s3_check_curl; fi
 s3_config
-if [ "$S3_OP_TIMEOUT" -gt 0 ]; then S3_DEADLINE=$(( $(s3_now) + S3_OP_TIMEOUT )); fi
+if [ "$S3_OP_TIMEOUT" -gt 0 ]; then
+  S3_DEADLINE=$(( $(s3_now) + S3_OP_TIMEOUT ))
+  # presign makes one request at most (S3_REGION=auto): nothing to share.
+  if [ "$_s3_verb" != presign ]; then
+    s3_mktemp S3_PROGRESS "${TMPDIR:-/tmp}"
+    s3_register "$S3_PROGRESS.new"
+  fi
+fi
 _s3_rc=0
 "cmd_$_s3_verb" "$@" || _s3_rc=$?
 exit "$_s3_rc"

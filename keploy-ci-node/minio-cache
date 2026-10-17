@@ -47,9 +47,11 @@
 #            loudly on stderr and is also a cold start (exit 0), as it always
 #            was for this helper: callers in several repos run it without
 #            `|| true`. A failed extract of a verified stream (e.g. a full disk)
-#            still exits non-zero, as the old `mc cat | tar -x` did. The whole
-#            restore is capped at S3_OP_TIMEOUT (600 s): a store that is slow
-#            but alive means a cold start, not a stalled lane.
+#            still exits non-zero, as the old `mc cat | tar -x` did.
+#            S3_OP_TIMEOUT (600 s) ends a restore once the store has not
+#            answered for that long, by progress, not as a budget: a store
+#            that is not answering means a cold start, not a stalled lane,
+#            and a stream that moves is never cut.
 #   save     The archive is written to a temp file and uploaded as ONE object
 #            (Content-MD5 on every request, read back; over 5 GiB a verified
 #            multipart upload): the object is replaced whole or not at all. A

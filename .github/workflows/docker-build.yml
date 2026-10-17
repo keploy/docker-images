@@ -45,7 +45,7 @@ jobs:
       - name: Every baked s3.sh is the shared copy
         run: |
           set -eu
-          want=0ad1be42cad01a41fc7d3ec2fc55eb0fe9b41cf0c797febd335418560a2b0249
+          want=40da95b471bb8e77f7851b2a32b04317b3743f3a289b730b10caf01145e8fbac
           status=0
           n=0
           for f in $(git ls-files '*/s3.sh'); do
@@ -62,7 +62,7 @@ jobs:
           [ "$n" -gt 0 ] || { echo "::error::no s3.sh copies found"; status=1; }
           # s3-test.sh (the suite the live step runs against the baked s3.sh) is
           # the shared copy too: the client and its suite move together.
-          want_test=de21838cf744fb72ce39982b1e8f623964b0bf7377a090a5d510f88e0926ba2f
+          want_test=bb41f8ad34ed3a4e5fc8c225214b98fedf778cc2b780074dfe44681c0580b268
           nt=0
           for f in $(git ls-files '*/s3-test.sh'); do
             nt=$((nt + 1))
@@ -309,7 +309,7 @@ jobs:
             fi
           done
           got=$(docker run --rm --entrypoint sha256sum keploy-ci-node:pr-threading-test /usr/local/lib/keploy-ci/s3.sh | cut -d' ' -f1)
-          [ "$got" = 0ad1be42cad01a41fc7d3ec2fc55eb0fe9b41cf0c797febd335418560a2b0249 ] \
+          [ "$got" = 40da95b471bb8e77f7851b2a32b04317b3743f3a289b730b10caf01145e8fbac ] \
             || { echo "::error::node's /usr/local/lib/keploy-ci/s3.sh is not the shared copy ($got)"; exit 1; }
 
       # minio-cache and s3.sh inside the image the lanes run, against the CI
