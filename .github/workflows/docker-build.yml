@@ -108,6 +108,37 @@ jobs:
             exit 1
           fi
 
+  # start-docker (baked into keploy-ci, and so into every image built FROM it)
+  # starts containerd and then dockerd on it, and waits on each while it is
+  # alive and its log grows. Its cases run in fresh privileged containers of
+  # the keploy-ci image this commit builds (its engine and containerd, not
+  # the last release's), stand-ins making containerd slow, dead or silent and
+  # dockerd slow or wedged as a starved host does. Each case has a hang guard
+  # of its own (CASE_GUARD, 900 s), which ends a case that hangs and fails
+  # it; the job's cap is the last one.
+  start-docker:
+    name: start-docker waits on containerd and dockerd
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build this commit's keploy-ci image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./keploy-ci
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: keploy-ci:start-docker-test
+
+      - name: start-docker's cases, on that image
+        run: bash keploy-ci/start-docker-test.sh keploy-ci:start-docker-test
+
   # ── Stage 1: base images (no cross-image deps) ─────────────────────
   base-images:
     name: "${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }})"
