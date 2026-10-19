@@ -46,7 +46,22 @@ ARG SNAPSHOT=20261019T000000Z
 # package against the SHA-256 in that signed index, as it does over the plain
 # http archive.ubuntu.com the base is configured with. Every fetch after it
 # verifies the certificate too.
+#
+# Every fetch survives a short upstream outage, under the bounded-retry rule of
+# keploy/ebpf's .woodpecker/fetch.sh: a bounded number of attempts, spaced so
+# that a blip (a run of 5xx, a mirror restart) does not use them all up in
+# seconds. apt 2.4 retries a file after a transient failure (HTTP 408, 429, 500,
+# 502, 503, 504 or 599, or a timeout), waiting min(2^n, Maximum) s before
+# retry n+1. Its default, 3 retries, spans 7 s; at v1.2.43 snapshot.ubuntu.com
+# answered 503 for longer than that, to every file. 7 retries capped at 40 s
+# wait 1+2+4+8+16+32+40 = 103 s, the span of fetch.sh's 10+20+30+40 s. And
+# apt-get update fails when it cannot fetch an index (Error-Mode any): by
+# default it only warns about a transient failure and exits 0, and the build
+# then failed on "Version ... was not found" rather than on the 503.
+# Build-time only: the file goes with the package lists.
 RUN set -eux; \
+    printf '%s\n' 'Acquire::Retries "7";' 'Acquire::Retries::Delay::Maximum "40";' \
+        'APT::Update::Error-Mode "any";' > /etc/apt/apt.conf.d/80-build-fetch; \
     printf 'deb https://snapshot.ubuntu.com/ubuntu/%s %s main universe\n' \
         "$SNAPSHOT" jammy "$SNAPSHOT" jammy-updates "$SNAPSHOT" jammy-security \
         > /etc/apt/sources.list; \
@@ -64,7 +79,7 @@ RUN set -eux; \
         libc6-dev=2.35-0ubuntu3.15 \
         libc6-dev-arm64-cross=2.35-0ubuntu1cross3 \
         git=1:2.34.1-1ubuntu1.17; \
-    rm -rf /var/lib/apt/lists/*; \
+    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/80-build-fetch; \
     ln -sf /usr/bin/llvm-strip-14 /usr/bin/llvm-strip; \
     ln -sf /usr/bin/clang-14 /usr/bin/clang
 
