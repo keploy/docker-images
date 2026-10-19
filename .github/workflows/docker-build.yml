@@ -16,6 +16,57 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── One Go patch in every image that ships Go (no build needed) ────
+  # A Go build cache is keyed by the toolchain that wrote it: lanes on two
+  # patches that share one cache split it, each rebuilding what the other
+  # cached. keploy-ci's GO_VERSION (an X.Y.Z, with go.dev's SHA-256 for each
+  # tarball) is the patch; go-build and golint must be FROM that patch's
+  # golang image by digest (a bare golang:1.27-bookworm floats to each new
+  # patch), and ebpf-objects must fetch and check that patch's tarball. The
+  # builds below then run each image's go and compare.
+  go-patch:
+    name: One Go patch in every image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Every Dockerfile that ships Go names keploy-ci's GO_VERSION
+        run: |
+          set -eu
+          rc=0
+          bad() { echo "::error file=$1::$2"; rc=1; }
+          want="$(sed -n 's/^ARG GO_VERSION=//p' keploy-ci/Dockerfile)"
+          printf '%s\n' "$want" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' \
+            || bad keploy-ci/Dockerfile "GO_VERSION='$want' is not one X.Y.Z patch"
+          for a in AMD64 ARM64; do
+            grep -qxE "ARG GO_SHA256_$a=[0-9a-f]{64}" keploy-ci/Dockerfile \
+              || bad keploy-ci/Dockerfile "no ARG GO_SHA256_$a=<go.dev's SHA-256 of go$want.linux-$(echo $a | tr A-Z a-z).tar.gz>"
+          done
+          grep -qF 'sha256sum -c' keploy-ci/Dockerfile || bad keploy-ci/Dockerfile "the Go tarball is not checked against GO_SHA256_*"
+          v="$(printf '%s' "$want" | sed 's/\./\\./g')"
+          for f in keploy-ci-go-build/Dockerfile keploy-ci-golint/Dockerfile; do
+            from="$(grep -m1 '^FROM ' "$f")"
+            printf '%s\n' "$from" | grep -qxE "FROM golang:$v-bookworm@sha256:[0-9a-f]{64}" \
+              || bad "$f" "'$from': want FROM golang:$want-bookworm@sha256:<its index digest>"
+          done
+          f=keploy-ci-ebpf-objects/Dockerfile
+          grep -qF "https://go.dev/dl/go$want.linux-amd64.tar.gz" "$f" || bad "$f" "does not fetch go$want.linux-amd64.tar.gz"
+          grep -qE '^ADD --checksum=sha256:[0-9a-f]{64} ' "$f" || bad "$f" "its Go tarball is not ADDed with --checksum"
+          grep -qF "go version | grep -qF 'go$want linux/amd64'" "$f" || bad "$f" "its build does not check go version is go$want"
+          # No other Go named in any instruction (comments aside): another
+          # golang image (by tag, digest or variable), a Go tarball (binary or
+          # source) of another version written out, from any host, Debian's
+          # golang packages, or a GOTOOLCHAIN that names a toolchain, quoted
+          # or not. A tarball named through a variable (keploy-ci's
+          # go${GO_VERSION}) is the runtime check's to catch.
+          others="$(cat keploy-ci*/Dockerfile | grep -v '^[[:space:]]*#' \
+            | grep -oE 'golang[:@][^[:space:]]*|/go[0-9][0-9.]*[0-9]\.(linux-[a-z0-9]+|src)|golang-go|golang-[0-9.]+-go|GOTOOLCHAIN=["'"'"']?go[^[:space:]"'"'"']*' \
+            | grep -vxE "golang:$v-bookworm@sha256:[0-9a-f]{64}|/go$v\.linux-amd64" | sort -u || true)"
+          [ -z "$others" ] || bad . "other Go named: $others"
+          [ "$rc" = 0 ] && echo "every image that ships Go names go$want"
+          exit "$rc"
+
   # ── Stage 0: the minio-cache helper and the s3.sh client it speaks through
   # are duplicated per build context (Docker cannot COPY outside a context).
   # Drift between copies is how the ILM rule-spam regression shipped, so fail
@@ -152,9 +203,11 @@ jobs:
           - context: ./keploy-ci
             tag-prefix: ''
             arch: amd64
+            go: true
           - context: ./keploy-ci
             tag-prefix: ''
             arch: arm64
+            go: true
           - context: ./keploy-ci-slim
             tag-prefix: 'slim-'
             arch: amd64
@@ -170,9 +223,11 @@ jobs:
           - context: ./keploy-ci-golint
             tag-prefix: 'golint-'
             arch: amd64
+            go: true
           - context: ./keploy-ci-golint
             tag-prefix: 'golint-'
             arch: arm64
+            go: true
           - context: ./keploy-ci-awscli
             tag-prefix: 'awscli-'
             arch: amd64
@@ -189,6 +244,7 @@ jobs:
           - context: ./keploy-ci-go-build
             tag-prefix: 'go-build-'
             arch: amd64
+            go: true
 
     steps:
       - name: Checkout repository
@@ -207,7 +263,18 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           push: false
+          load: ${{ matrix.go || false }}
           tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}
+
+      - name: Its go is keploy-ci's GO_VERSION
+        if: matrix.go
+        run: |
+          set -eu
+          want="go$(sed -n 's/^ARG GO_VERSION=//p' keploy-ci/Dockerfile)"
+          got="$(docker run --rm --platform "linux/${{ matrix.arch }}" --entrypoint go \
+            "keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}" env GOVERSION)"
+          echo "keploy-ci declares $want; ${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }}) runs $got"
+          [ "$got" = "$want" ] || { echo "::error::${{ matrix.tag-prefix || 'base' }} ships $got, not $want"; exit 1; }
 
   # ── A tier-1 image no other image needs, in a job of its own ────────
   # As in publish.yml: derived-images needs base-images, so a leg there that
@@ -224,6 +291,7 @@ jobs:
           - context: ./keploy-ci-ebpf-objects
             tag-prefix: 'ebpf-objects-'
             arch: amd64
+            go: true
 
     steps:
       - name: Checkout repository
@@ -238,7 +306,18 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           push: false
+          load: ${{ matrix.go || false }}
           tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}
+
+      - name: Its go is keploy-ci's GO_VERSION
+        if: matrix.go
+        run: |
+          set -eu
+          want="go$(sed -n 's/^ARG GO_VERSION=//p' keploy-ci/Dockerfile)"
+          got="$(docker run --rm --platform "linux/${{ matrix.arch }}" --entrypoint go \
+            "keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}" env GOVERSION)"
+          echo "keploy-ci declares $want; ${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }}) runs $got"
+          [ "$got" = "$want" ] || { echo "::error::${{ matrix.tag-prefix || 'base' }} ships $got, not $want"; exit 1; }
 
   # ── Stage 2: images that derive FROM keploy-ci ─────────────────────
   # Exercise the BASE_TAG threading that publish.yml relies on.

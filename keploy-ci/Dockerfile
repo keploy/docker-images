@@ -6,7 +6,15 @@
 # Linux binaries with CGO_ENABLED=0.
 FROM debian:trixie-slim
 
-ARG GO_VERSION=1.27.0
+# One Go patch in every CI image that ships Go: this one (and every image FROM
+# it), go-build, golint and ebpf-objects. A Go build cache is keyed by the
+# toolchain that wrote it, so a cache shared across lanes on different patches
+# splits, each lane rebuilding what the other cached. docker-build.yml holds
+# them to one. GO_SHA256_* are go.dev's SHA-256 of each release tarball
+# (https://go.dev/dl/?mode=json), checked before it is unpacked.
+ARG GO_VERSION=1.27.2
+ARG GO_SHA256_AMD64=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+ARG GO_SHA256_ARM64=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
 # Keep Docker "major.minor" aligned with the latest stable release.
 ARG DOCKER_MAJOR_MINOR=29.1
 # Provided automatically by BuildKit/buildx; fallback to dpkg when unset.
@@ -79,6 +87,8 @@ RUN set -eux; \
         *) echo "Unsupported architecture: $ARCH"; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz; \
+    case "$ARCH" in amd64) sum="$GO_SHA256_AMD64" ;; arm64) sum="$GO_SHA256_ARM64" ;; esac; \
+    echo "$sum  /tmp/go.tgz" | sha256sum -c -; \
     rm -rf /usr/local/go; \
     tar -C /usr/local -xzf /tmp/go.tgz; \
     rm -f /tmp/go.tgz

@@ -1,7 +1,7 @@
 # keploy-ci-ebpf-objects: the toolchain keploy/ebpf's committed BPF objects are
 # built with (the recipe in its compile.sh header: Ubuntu 22.04, clang-14 and
 # llvm-14, libbpf-dev 0.5.0, the native and arm64 cross kernel and libc
-# headers, Go 1.27.1, git), pinned, so that its objects-reproducible lane
+# headers, Go 1.27.2, git), pinned, so that its objects-reproducible lane
 # rebuilds every committed object without apt or a Go download.
 # Used by: keploy/ebpf .woodpecker/objects-reproducible.yml, by digest.
 #
@@ -31,8 +31,8 @@
 # pinned the same way.
 FROM ubuntu@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956 AS go
 
-ADD --checksum=sha256:63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 \
-    https://go.dev/dl/go1.27.1.linux-amd64.tar.gz /tmp/go.tgz
+ADD --checksum=sha256:ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5 \
+    https://go.dev/dl/go1.27.2.linux-amd64.tar.gz /tmp/go.tgz
 RUN tar -C /usr/local -xzf /tmp/go.tgz
 
 FROM ubuntu@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956
@@ -90,7 +90,7 @@ ENV PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local
 # target with compile.sh's include paths, from the kernel and libbpf headers,
 # and strip it.
 RUN set -eux; \
-    go version | grep -qF 'go1.27.1 linux/amd64'; \
+    go version | grep -qF 'go1.27.2 linux/amd64'; \
     printf '#include <linux/bpf.h>\n#include <linux/types.h>\n#include <asm/types.h>\n#include <bpf/bpf_helpers.h>\nSEC("tracepoint/x") int probe(void *ctx) { return 0; }\nchar LICENSE[] SEC("license") = "GPL";\n' > /tmp/probe.c; \
     clang -target bpf -O2 -g -D__x86_64__ -I/usr/include/x86_64-linux-gnu -c /tmp/probe.c -o /tmp/probe-x86.o; \
     clang -target bpf -O2 -g -D__aarch64__ -I/usr/aarch64-linux-gnu/include -I/usr/include/aarch64-linux-gnu -c /tmp/probe.c -o /tmp/probe-arm64.o; \
