@@ -86,7 +86,7 @@ run "settings" 'for s in START_DOCKER_SILENCE_CHECKS=0 START_DOCKER_PROBE_SECOND
   env "$s" start-docker; echo "$s: rc=$?"
 done
 mkdir -p /etc/docker && printf "{\"data-root\": \"/x\"}\n" >/etc/docker/daemon.json && start-docker; echo "daemon.json: rc=$?"; rm -f /etc/docker/daemon.json
-DOCKERD_FLAGS="-ldebug --dns 1.1.1.1" START_DOCKER_SILENCE_CHECKS=1 start-docker >/tmp/fine.out 2>&1; grep -q "sets" /tmp/fine.out && echo "a fine flag refused"
+DOCKERD_FLAGS="-ldebug -spool --dns 1.1.1.1" START_DOCKER_SILENCE_CHECKS=1 start-docker >/tmp/fine.out 2>&1; grep -q "sets" /tmp/fine.out && echo "a fine flag refused"
 pgrep -x containerd >/dev/null && echo "a start began" || echo "nothing started"; pkill -9 -x dockerd; pkill -9 -x containerd; true'
 if grep -q "START_DOCKER_SILENCE_CHECKS=0: rc=2" <<<"$out" && grep -q "START_DOCKER_PROBE_SECONDS=x: rc=2" <<<"$out" \
   && grep -q "START_DOCKER_NOTICE_LOOKS=-1: rc=2" <<<"$out" && grep -q "whole numbers, 1 or more" <<<"$out" \
@@ -216,9 +216,10 @@ if grep -q "first rc=1" <<<"$out" && grep -q "containerd was started again; exit
 else fail "a start that fails after containerd was started again leaves nothing: the watcher stops and reaps the containerd it started"; fi
 
 # dockerd listens before its init and answers after: a stand-in stops the
-# real one once its socket is there, so docker info blocks, as on a slow
+# real one once its socket is there, so its /_ping blocks, as on a slow
 # init. Saying what it does (its log grows), it is waited for, a blocked
-# probe being no answer that look; saying nothing, it fails, said.
+# probe being no answer that look (and one wedged, saying nothing, fails:
+# dockerd-wedged, below, with a stand-in of its own).
 dockerd_shim='mkdir -p /opt/shim && cat >/opt/shim/dockerd <<"EOF"
 #!/bin/sh
 /usr/bin/dockerd "$@" & d=$!
@@ -236,50 +237,180 @@ PROGRESS=1 STEPS=75 PATH=/opt/shim:$PATH START_DOCKER_SILENCE_CHECKS=60 start-do
 if [ "$rc" = 0 ] && grep -q "Docker daemon is ready" <<<"$out"; then
   pass "a dockerd whose init is slow but says what it does is waited for, its blocked probes no answer, not the end"
 else fail "a dockerd whose init is slow but says what it does is waited for, its blocked probes no answer, not the end"; fi
-run "dockerd-wedged" "$dockerd_shim"'
-PATH=/opt/shim:$PATH START_DOCKER_SILENCE_CHECKS=4 START_DOCKER_NOTICE_LOOKS=2 start-docker'
-if [ "$rc" = 1 ] && grep -q "dockerd has not answered, and its log has not grown in 2 looks; still waiting" <<<"$out" \
+# Wedged, it is given 4 looks of silence. containerd answers before the
+# start (one no pidfile names: taken after one bounded look, not waited on),
+# so the 4 looks are dockerd's alone, none spent on a containerd starting.
+# The wedged dockerd is a stand-in that listens on dockerd's socket, as
+# dockerd does before its init, and never answers nor logs: the real one,
+# stopped once its socket is there, could finish its init first on a
+# starved host.
+wedged_shim='mkdir -p /opt/shim && cat >/opt/shim/dockerd <<"EOF"
+#!/usr/bin/python3
+import os, socket, time
+s = socket.socket(socket.AF_UNIX)
+s.bind("/var/run/docker.sock.tmp")
+s.listen()
+os.rename("/var/run/docker.sock.tmp", "/var/run/docker.sock")
+while True:
+    time.sleep(3600)
+EOF
+chmod +x /opt/shim/dockerd'
+run "dockerd-wedged" "$wedged_shim"'
+mkdir -p /var/lib/docker/containerd/daemon /var/run/docker/containerd
+containerd --root /var/lib/docker/containerd/daemon --state /var/run/docker/containerd/daemon --address /var/run/docker/containerd/containerd.sock >/var/log/own-containerd.log 2>&1 & c=$!
+until ctr --address /var/run/docker/containerd/containerd.sock version >/dev/null 2>&1 || ! kill -0 "$c" 2>/dev/null; do sleep 0.1; done
+PATH=/opt/shim:$PATH START_DOCKER_SILENCE_CHECKS=4 START_DOCKER_NOTICE_LOOKS=2 START_DOCKER_PROBE_SECONDS=60 start-docker'
+if [ "$rc" = 1 ] && grep -q "containerd already answers on /var/run/docker/containerd/containerd.sock (no pidfile names it" <<<"$out" \
+  && grep -q "dockerd has not answered, and its log has not grown in 2 looks; still waiting" <<<"$out" \
   && grep -q "dockerd has not answered, and its log has not grown in 4 looks$" <<<"$out"; then
   pass "a dockerd wedged in its init, its probes blocked and its log still, is said to stall as it goes on, and fails the start, said"
 else fail "a dockerd wedged in its init, its probes blocked and its log still, is said to stall as it goes on, and fails the start, said"; fi
 
-# A probe that takes long is waited for, not cut: a docker that answers in 8 s
-# (as docker info does while it waits on a starved containerd), with 30 looks
-# of silence allowed and the bound on one-shot probes at 2 s.
-run "slow-probe" 'mkdir -p /opt/shim && printf "#!/bin/sh\n[ \"\$1\" != info ] || sleep 8\nexec /usr/bin/docker \"\$@\"\n" >/opt/shim/docker && chmod +x /opt/shim/docker
+# A probe that takes long is waited for, not cut: dockerd's socket reached
+# through a relay that holds each connection 8 s before it passes it on (as
+# a starved host answers late), with 60 looks of silence allowed and the
+# bound on one-shot probes at 2 s. The 8 s are the probe's own, within
+# curl's transfer: a bound on it (timeout, or curl's --max-time) cuts it.
+run "slow-probe" 'mkdir -p /opt/shim && cat >/opt/relay.py <<"PY"
+import socket, threading, time
+def pump(a, b):
+    try:
+        while True:
+            x = a.recv(65536)
+            if not x:
+                break
+            b.sendall(x)
+    except OSError:
+        pass
+    for s in (a, b):
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+def relay(c):
+    time.sleep(8)
+    d = socket.socket(socket.AF_UNIX)
+    try:
+        d.connect("/var/run/docker.sock")
+    except OSError:
+        c.close()
+        return
+    threading.Thread(target=pump, args=(d, c), daemon=True).start()
+    pump(c, d)
+l = socket.socket(socket.AF_UNIX)
+l.bind("/tmp/slow.sock")
+l.listen(64)
+while True:
+    threading.Thread(target=relay, args=(l.accept()[0],), daemon=True).start()
+PY
+cat >/opt/shim/curl <<"EOF"
+#!/bin/sh
+for a; do shift; [ "$a" != /var/run/docker.sock ] || a=/tmp/slow.sock; set -- "$@" "$a"; done
+exec /usr/bin/curl "$@"
+EOF
+chmod +x /opt/shim/curl
+python3 /opt/relay.py & until [ -S /tmp/slow.sock ]; do sleep 0.05; done
 PATH=/opt/shim:$PATH START_DOCKER_SILENCE_CHECKS=60 START_DOCKER_PROBE_SECONDS=2 start-docker'
 if [ "$rc" = 0 ] && grep -q "Docker daemon is ready" <<<"$out"; then
   pass "a probe that takes 8 s to answer is waited for, not cut short, and its answer taken"
 else fail "a probe that takes 8 s to answer is waited for, not cut short, and its answer taken"; fi
 
-# A socket no pidfile names gets one look, bounded
-# (START_DOCKER_PROBE_SECONDS). One that refuses (nothing listens: a daemon
-# gone without removing it) is taken over: the start goes on, and its own
-# dockerd binds the socket. One that listens and does not answer (a daemon
-# start-docker knows nothing of, slow or wedged) fails the start, said, and
-# nothing is started over it.
-run "dead-socket" 'python3 -c "import socket; socket.socket(socket.AF_UNIX).bind(\"/var/run/docker.sock\")"
-START_DOCKER_PROBE_SECONDS=2 start-docker'
+# A socket no pidfile names, dockerd's or containerd's, gets one look,
+# bounded (START_DOCKER_PROBE_SECONDS). One that refuses (nothing listens: a
+# daemon gone without removing it) is taken over: the start goes on, and its
+# own daemon binds the socket. The bound is the dial's: clients that take 3 s
+# to start (a starved host's), against a bound of 2, do not make a socket
+# that refuses look mute. One that listens and does not answer (a daemon
+# start-docker knows nothing of, slow or wedged), or answers as no such
+# daemon does, fails the start, said, and nothing is started over it.
+# listen.py SOCK dead|mute|http404 binds SOCK and: listens on nothing (dead);
+# listens and never accepts (mute); answers every request with a 404
+# (http404). A listening socket is bound beside SOCK and renamed onto it once
+# it listens: SOCK is never there unlistened, which start-docker would take
+# for a dead one and take over.
+listener='mkdir -p /opt /var/run/docker/containerd && cat >/opt/listen.py <<"PY"
+import socket, sys, time
+import os
+s = socket.socket(socket.AF_UNIX)
+if sys.argv[2] == "dead":
+    s.bind(sys.argv[1])
+    sys.exit(0)
+s.bind(sys.argv[1] + ".tmp")
+s.listen()
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+if sys.argv[2] == "mute":
+    time.sleep(600)
+while True:
+    c, _ = s.accept()
+    c.recv(65536)
+    c.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    c.close()
+PY
+CSOCK=/var/run/docker/containerd/containerd.sock
+listen() { python3 /opt/listen.py "$1" "$2" & until [ -S "$1" ]; do sleep 0.05; done; }'
+run "dead-socket" "$listener"'
+listen /var/run/docker.sock dead; listen "$CSOCK" dead
+mkdir -p /opt/shim && for c in curl docker ctr; do printf "#!/bin/sh\nsleep 3\nexec /usr/bin/$c \"\$@\"\n" >"/opt/shim/$c"; chmod +x "/opt/shim/$c"; done
+PATH=/opt/shim:$PATH START_DOCKER_PROBE_SECONDS=2 start-docker'
 if [ "$rc" = 0 ] && grep -q "Starting containerd" <<<"$out" && grep -q "Docker daemon is ready" <<<"$out"; then
-  pass "a socket no pidfile names that refuses is taken over, and the start goes on"
-else fail "a socket no pidfile names that refuses is taken over, and the start goes on"; fi
-run "mute-socket" 'python3 -c "import socket, time; s = socket.socket(socket.AF_UNIX); s.bind(\"/var/run/docker.sock\"); s.listen(); time.sleep(600)" & until [ -S /var/run/docker.sock ]; do sleep 0.05; done
-START_DOCKER_PROBE_SECONDS=2 start-docker; echo "rc=$?"
-pgrep -x containerd >/dev/null && echo "a containerd was started" || echo "nothing started"'
-if grep -q "rc=1" <<<"$out" && grep -q "listens on /var/run/docker.sock and did not answer in 2s: not starting a second dockerd" <<<"$out" \
+  pass "sockets no pidfile names that refuse, dockerd's and containerd's, are taken over, clients slow to start notwithstanding, and the start goes on"
+else fail "sockets no pidfile names that refuse, dockerd's and containerd's, are taken over, clients slow to start notwithstanding, and the start goes on"; fi
+run "mute-socket" "$listener"'
+listen /var/run/docker.sock mute; m=$!
+START_DOCKER_PROBE_SECONDS=2 start-docker; echo "dockerd: rc=$?"
+kill "$m"; wait "$m"; rm -f /var/run/docker.sock
+listen "$CSOCK" mute
+START_DOCKER_PROBE_SECONDS=2 start-docker; echo "containerd: rc=$?"
+pgrep -x containerd >/dev/null || pgrep -x dockerd >/dev/null && echo "a daemon was started" || echo "nothing started"'
+if grep -q "dockerd: rc=1" <<<"$out" && grep -q "listens on /var/run/docker.sock and did not answer in 2s: not starting a second dockerd over it" <<<"$out" \
+  && grep -q "containerd: rc=1" <<<"$out" && grep -q "listens on /var/run/docker/containerd/containerd.sock and did not answer in 2s: not starting a second containerd over it" <<<"$out" \
   && grep -q "nothing started" <<<"$out"; then
-  pass "a socket no pidfile names that listens and does not answer fails the start, said, and nothing is started over it"
-else fail "a socket no pidfile names that listens and does not answer fails the start, said, and nothing is started over it"; fi
+  pass "sockets no pidfile names that listen and do not answer, dockerd's and containerd's, fail the start, said, and nothing is started over them"
+else fail "sockets no pidfile names that listen and do not answer, dockerd's and containerd's, fail the start, said, and nothing is started over them"; fi
+# Answering as no such daemon does: an HTTP server on either socket, and a
+# containerd without its Version service (its gRPC answers, Unimplemented).
+run "foreign-socket" "$listener"'
+listen /var/run/docker.sock http404; m=$!
+START_DOCKER_PROBE_SECONDS=2 start-docker; echo "dockerd: rc=$?"
+kill "$m"; wait "$m"; rm -f /var/run/docker.sock
+listen "$CSOCK" http404; m=$!
+START_DOCKER_PROBE_SECONDS=2 start-docker; echo "containerd, http: rc=$?"
+kill "$m"; wait "$m"; rm -f "$CSOCK"
+printf "version = 2\ndisabled_plugins = [\"io.containerd.grpc.v1.version\", \"io.containerd.grpc.v1.cri\"]\n" >/tmp/no-version.toml
+containerd --config /tmp/no-version.toml --root /tmp/croot --state /tmp/cstate --address "$CSOCK" >/tmp/c.log 2>&1 & c=$!
+until curl -s -o /dev/null --http2-prior-knowledge --unix-socket "$CSOCK" http://containerd/ || ! kill -0 "$c" 2>/dev/null; do sleep 0.1; done
+START_DOCKER_PROBE_SECONDS=2 start-docker; echo "containerd, no Version: rc=$?"
+echo "containerds: $(pgrep -cx containerd)"; pgrep -x dockerd >/dev/null && echo "a dockerd was started" || echo "no dockerd started"'
+if grep -q "dockerd: rc=1" <<<"$out" && grep -q "answers on /var/run/docker.sock, but not as dockerd does (curl's exit 22 on its /_ping, HTTP status 404): not starting a second dockerd over it" <<<"$out" \
+  && grep -q "containerd, http: rc=1" <<<"$out" && grep -q "answers on /var/run/docker/containerd/containerd.sock, but not as containerd does (curl's exit [0-9]* on its Version call): not starting a second containerd over it" <<<"$out" \
+  && grep -q "containerd, no Version: rc=1" <<<"$out" && grep -q "but not as containerd does (its Version call answered grpc-status: 12)" <<<"$out" \
+  && grep -q "containerds: 1" <<<"$out" && grep -q "no dockerd started" <<<"$out"; then
+  pass "sockets no pidfile names that answer as no such daemon does, dockerd's and containerd's, fail the start, said, and nothing is started over them"
+else fail "sockets no pidfile names that answer as no such daemon does, dockerd's and containerd's, fail the start, said, and nothing is started over them"; fi
+# A dockerd that answers and that no pidfile names (one a lane started some
+# other way, or whose pidfiles are gone) is reused after one look: no second
+# dockerd on the same socket. A ~/.curlrc that would change curl's request
+# (HTTP/2, which dockerd's socket does not speak) changes neither start's.
+run "unnamed-dockerd" 'echo --http2-prior-knowledge >/root/.curlrc &&
+START_DOCKER_SILENCE_CHECKS=60 start-docker >/dev/null && rm -f /var/run/docker.pid /var/run/docker/start-docker-dockerd.pid &&
+start-docker; echo "second rc=$?"; echo "dockerds: $(pgrep -cx dockerd)"'
+if grep -q "Docker daemon already running" <<<"$out" && grep -q "second rc=0" <<<"$out" && grep -q "dockerds: 1" <<<"$out"; then
+  pass "a dockerd that answers and that no pidfile names is reused after one look, and no second one is started"
+else fail "a dockerd that answers and that no pidfile names is reused after one look, and no second one is started"; fi
 
 # A start killed after it started dockerd, before dockerd wrote its own
-# pidfile (dockerd slow to begin, as a starved one is): the next start finds
-# it by the pid start-docker wrote, and waits for it.
-run "killed-before-dockerd-pidfile" 'mkdir -p /opt/shim && printf "#!/bin/sh\nsleep 5\nexec /usr/bin/dockerd \"\$@\"\n" >/opt/shim/dockerd && chmod +x /opt/shim/dockerd
+# pidfile (dockerd slow to begin, as a starved one is; here held until the
+# case lets it go, once the next start has looked): the next start finds it
+# by the pid start-docker wrote, and waits for it.
+run "killed-before-dockerd-pidfile" 'mkdir -p /opt/shim && printf "#!/bin/sh\nuntil [ -e /tmp/go ]; do sleep 0.05; done\nexec /usr/bin/dockerd \"\$@\"\n" >/opt/shim/dockerd && chmod +x /opt/shim/dockerd
 PATH=/opt/shim:$PATH start-docker >/dev/null 2>&1 & first=$!
 until [ -s /var/run/docker/start-docker-dockerd.pid ]; do sleep 0.05; done
 kill -9 "$first"; wait "$first" 2>/dev/null
+PATH=/opt/shim:$PATH start-docker >/tmp/second.out 2>&1 & second=$!
+until grep -q "is already running; waiting for it to answer\|Starting dockerd" /tmp/second.out || ! kill -0 "$second" 2>/dev/null; do sleep 0.05; done
 [ -s /var/run/docker.pid ] || echo "dockerd has written no pidfile yet"
-PATH=/opt/shim:$PATH start-docker; echo "second rc=$?"'
+touch /tmp/go
+wait "$second"; echo "second rc=$?"; cat /tmp/second.out'
 if grep -q "dockerd has written no pidfile yet" <<<"$out" && grep -q "dockerd ([0-9]*) is already running; waiting for it to answer" <<<"$out" \
   && grep -q "second rc=0" <<<"$out"; then
   pass "a start killed before dockerd wrote its pidfile leaves its pid: the next start waits for that dockerd"

@@ -14,12 +14,11 @@
 # Each daemon is waited for while it is alive and making progress: until it
 # answers, it exits, or its log has not grown for START_DOCKER_SILENCE_CHECKS
 # looks in a row (600 by default; a hang guard, not a budget for a start that
-# works). A look is a second. The probe (`ctr version`, `docker info`) is
+# works). A look is a second. The probe (`ctr version`, dockerd's /_ping) is
 # never cut short: one runs at a time, and each look sees whether it has
 # answered. dockerd listens on its socket before its init and answers only
-# after, and docker info asks containerd, the daemon that starves, for its
-# system info: a probe that takes long is still waited for, and its answer
-# taken when it comes. Only a daemon that stops progressing ends the wait,
+# after: a probe that takes long is still waited for, and its answer taken
+# when it comes. Only a daemon that stops progressing ends the wait,
 # and then the probe in flight is killed. A stall is said as it goes on,
 # every START_DOCKER_NOTICE_LOOKS quiet looks (30), with the daemon's last
 # log line, so a CI step cut by its own cap still says why.
@@ -27,8 +26,14 @@
 # at a socket no pidfile names, which it has nothing else to watch on: a
 # daemon there that answers is reused, a socket that refuses (nothing
 # listens) is taken over, and one that listens and does not answer within
-# the bound fails the start, said: its daemon may be slow, not gone, and a
-# second one on the same root is not started.
+# the bound, or answers as no such daemon does, fails the start, said: its
+# daemon may be slow, not gone, and a second one on the same root is not
+# started. curl asks (dockerd's /_ping; containerd's Version, over gRPC, as
+# ctr version does; with -q, so no ~/.curlrc changes the request): its exit
+# says which of those it was, and its bound starts as it dials. A client's
+# own start does not count: docker info runs its CLI plugins (buildx,
+# compose) before it dials, and on a starved host that alone could take the
+# bound and pass a socket that refuses for a mute one.
 #
 # containerd runs as dockerd would run it: its root and state under
 # /var/lib/docker and /var/run/docker (the image's /var/lib/docker volume),
@@ -99,7 +104,7 @@ for f in $FLAGS; do
         c=${g%"${g#?}"} g=${g#?}
         case "$c" in
           H | p | g) fixed DOCKERD_FLAGS "-$c" ;;
-          l | G | b | e) break ;;
+          l | G | b | e | s) break ;;
         esac
       done
       ;;
@@ -111,11 +116,41 @@ fi
 
 mkdir -p /var/run /var/lib/docker "$CONTAINERD_ROOT" "$CONTAINERD_STATE" /var/log
 
-# probe CMD...: CMD answers within PROBE_SECONDS. Only for a daemon no
-# pidfile names, which start-docker has nothing else to watch on (a hang
-# guard); a daemon it waits on is probed without a bound (await).
-probe() {
-  timeout "$PROBE_SECONDS" "$@" >/dev/null 2>&1 9>&-
+# answers_once DAEMON SOCK: the one look at a socket no pidfile names, which
+# start-docker has nothing else to watch on, bounded (PROBE_SECONDS, from
+# the dial: a hang guard); a daemon it waits on is probed without a bound
+# (await). Returns 0 when DAEMON (dockerd or containerd) answers there as it
+# does, and 1 when nothing listens (the socket refuses: curl's 7). One that
+# listens and does not answer in time (curl's 28), or answers as no DAEMON
+# does, fails the start, said: nothing is started over it.
+answers_once() {
+  _rc=0 _why=""
+  if [ "$1" = dockerd ]; then
+    _code=$(curl -q -sf -o /dev/null -w '%{http_code}' --unix-socket "$2" --max-time "$PROBE_SECONDS" http://docker/_ping 9>&-) || _rc=$?
+    [ "${_code:-000}" != 000 ] || _code=none
+    _why="curl's exit $_rc on its /_ping, HTTP status $_code"
+  else
+    # containerd's Version, an empty gRPC message (a 0 flag and a 0 length);
+    # its grpc-status, in the trailers curl prints with the headers, says
+    # whether it answered.
+    _hdr=$(printf '\0\0\0\0\0' | curl -q -s -o /dev/null -D - --http2-prior-knowledge --unix-socket "$2" --max-time "$PROBE_SECONDS" \
+      -H 'content-type: application/grpc' -H 'te: trailers' --data-binary @- \
+      http://containerd/containerd.services.version.v1.Version/Version 9>&-) || _rc=$?
+    _why="curl's exit $_rc on its Version call"
+    if [ "$_rc" = 0 ]; then
+      printf '%s\n' "$_hdr" | grep -q '^grpc-status: 0[[:space:]]*$' && return 0
+      _st=$(printf '%s\n' "$_hdr" | grep -m 1 '^grpc-status:' | tr -d '\r')
+      _why="its Version call answered ${_st:-no grpc-status}"
+      _rc=1
+    fi
+  fi
+  case $_rc in
+    0) return 0 ;;
+    7) return 1 ;;
+    28) echo "start-docker: something no pidfile names listens on $2 and did not answer in ${PROBE_SECONDS}s: not starting a second $1 over it" ;;
+    *) echo "start-docker: something no pidfile names answers on $2, but not as $1 does ($_why): not starting a second $1 over it" ;;
+  esac
+  exit 1
 }
 
 # alive PID: the process runs (a zombie, exited but not yet reaped, does not).
@@ -236,7 +271,7 @@ fi
 old=$(pidfile_names "$DOCKERD_STARTED" dockerd || pidfile_names "$DOCKERD_PIDFILE" dockerd || true)
 if [ -n "$old" ]; then
   echo "dockerd ($old) is already running; waiting for it to answer"
-  if ! await dockerd "$old" "$DOCKERD_LOG" docker -H "unix://$DOCKER_SOCK" info; then
+  if ! await dockerd "$old" "$DOCKERD_LOG" curl -q -sf -o /dev/null --unix-socket "$DOCKER_SOCK" http://docker/_ping; then
     fail_start "Docker daemon failed to start"
   fi
   echo "Docker daemon is ready"
@@ -244,20 +279,11 @@ if [ -n "$old" ]; then
 fi
 # A socket no pidfile names: one look, bounded. What answers is reused; what
 # listens and does not answer may be a slow daemon, not a gone one, and is
-# not started over; a socket that refuses (nothing listens) is taken over.
-if [ -S "$DOCKER_SOCK" ]; then
-  rc=0
-  probe docker -H "unix://$DOCKER_SOCK" info || rc=$?
-  case $rc in
-    0)
-      echo "Docker daemon already running"
-      exit 0
-      ;;
-    124)
-      echo "start-docker: something no pidfile names listens on $DOCKER_SOCK and did not answer in ${PROBE_SECONDS}s: not starting a second dockerd over it"
-      exit 1
-      ;;
-  esac
+# not started over, nor is what answers as no dockerd does; a socket that
+# refuses (nothing listens) is taken over.
+if [ -S "$DOCKER_SOCK" ] && answers_once dockerd "$DOCKER_SOCK"; then
+  echo "Docker daemon already running"
+  exit 0
 fi
 
 # containerd logs at dockerd's level, as dockerd gives the containerd it
@@ -297,19 +323,14 @@ if [ -n "$w" ] && is_watcher "$w" && ! containerd_named; then
   fi
 fi
 containerd_pid=""
-rc=1
 if containerd_pid=$(pidfile_names "$CONTAINERD_PIDFILE" containerd); then
   echo "containerd ($containerd_pid) is already running; waiting for it to answer"
   if ! await containerd "$containerd_pid" "$CONTAINERD_LOG" ctr --address "$CONTAINERD_SOCK" version; then
     fail_start "containerd failed to start"
   fi
   echo "containerd ($containerd_pid) already answers on $CONTAINERD_SOCK"
-elif [ -S "$CONTAINERD_SOCK" ] && { rc=0; probe ctr --address "$CONTAINERD_SOCK" version || rc=$?; [ "$rc" = 0 ] || [ "$rc" = 124 ]; }; then
+elif [ -S "$CONTAINERD_SOCK" ] && answers_once containerd "$CONTAINERD_SOCK"; then
   containerd_pid=""
-  if [ "$rc" = 124 ]; then
-    echo "start-docker: something no pidfile names listens on $CONTAINERD_SOCK and did not answer in ${PROBE_SECONDS}s: not starting a second containerd over it"
-    exit 1
-  fi
   echo "containerd already answers on $CONTAINERD_SOCK (no pidfile names it: it has no watcher)"
 else
   containerd_pid=""
@@ -364,7 +385,7 @@ dockerd --containerd="$CONTAINERD_SOCK" ${FLAGS} >>"$DOCKERD_LOG" 2>&1 9>&- &
 dockerd_pid=$!
 started="$dockerd_pid $started"
 echo "$dockerd_pid" >"$DOCKERD_STARTED"
-if ! await dockerd "$dockerd_pid" "$DOCKERD_LOG" docker -H "unix://$DOCKER_SOCK" info; then
+if ! await dockerd "$dockerd_pid" "$DOCKERD_LOG" curl -q -sf -o /dev/null --unix-socket "$DOCKER_SOCK" http://docker/_ping; then
   fail_start "Docker daemon failed to start"
 fi
 echo "Docker daemon is ready"
