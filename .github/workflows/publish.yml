@@ -1,11 +1,16 @@
 name: Publish Docker Images
 
+# Once per release. A release cut with a new tag (gh release create, or the
+# web UI) pushes that tag, so the tag push alone covers it. This workflow also
+# ran on `release: published`, which fired with that same push: every release
+# from v1.2.37 to v1.2.42 ran it twice, concurrently, so each tag was pushed
+# twice, under two digests, and the run that finished last won it. The other
+# digest stayed in GHCR untagged, and a lane pinning that one pins an image no
+# tag names.
 on:
   push:
     tags:
       - 'v*'
-  release:
-    types: [published]
 
 env:
   REGISTRY: ghcr.io
@@ -71,7 +76,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           # The bare `latest` comes from flavor, NOT from the raw rule below
-          # (that one needs is_default_branch, false on tag and release refs).
+          # (that one needs is_default_branch, false on tag refs).
           # flavor's default is latest=auto, which tags `latest` for every
           # type=semver rule whatever its pattern prefix, so every leg of every
           # job used to push a bare `latest` and the last to finish won: at
@@ -207,8 +212,8 @@ jobs:
         # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
         # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
-        # below is gated on is_default_branch, which is false for tag and release
-        # refs). Falling back would publish an image tagged with this release
+        # below is gated on is_default_branch, which is false for tag refs).
+        # Falling back would publish an image tagged with this release
         # while built on a stale or missing base — the exact defect BASE_TAG
         # exists to remove. Fail instead.
         env:
@@ -306,8 +311,8 @@ jobs:
         # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
         # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
-        # below is gated on is_default_branch, which is false for tag and release
-        # refs). Falling back would publish an image tagged with this release
+        # below is gated on is_default_branch, which is false for tag refs).
+        # Falling back would publish an image tagged with this release
         # while built on a stale or missing base — the exact defect BASE_TAG
         # exists to remove. Fail instead.
         env:
@@ -402,8 +407,8 @@ jobs:
         # No `latest` fallback: keploy-ci:latest has not tracked the base (see the
         # flavor note in base-images; at v1.2.40 it was the playwright image)
         # and keploy-ci:node-latest does not exist at all (the `*-latest` tag rule
-        # below is gated on is_default_branch, which is false for tag and release
-        # refs). Falling back would publish an image tagged with this release
+        # below is gated on is_default_branch, which is false for tag refs).
+        # Falling back would publish an image tagged with this release
         # while built on a stale or missing base — the exact defect BASE_TAG
         # exists to remove. Fail instead.
         env:
