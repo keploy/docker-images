@@ -158,17 +158,19 @@ The `ARG BASE_TAG=` default in each Dockerfile is only for a bare local
 
 ## Publishing
 
-Images are automatically published to GitHub Container Registry (ghcr.io) when:
-- A new tag is pushed (e.g., `v1.0.0`)
-- A new release is published
+Images are automatically published to GitHub Container Registry (ghcr.io) when
+a `vX.Y.Z` tag is pushed (e.g., `v1.0.0`), once per tag. Cutting a release with
+a new tag pushes it, so a release publishes too, through that push. (The
+workflow used to run on `release: published` as well, which fired with the same
+push and published every tag twice, under two digests.)
 
 Tags follow semantic versioning:
 - `v1.0.0` → `1.0.0`, `1.0`, `1` for every image, prefixed per variant
   (`node-1.0.0`, `playwright-1.0.0`, …)
 
 There is **no `<prefix>-latest`**. The `<prefix>latest` tag rule is
-`enable={{is_default_branch}}`, which is false on the tag and release refs this
-workflow runs on, so it never fires.
+`enable={{is_default_branch}}`, which is false on the tag refs this workflow
+runs on, so it never fires.
 
 The bare `latest` comes from somewhere else: `metadata-action`'s `flavor`, whose
 default `latest=auto` adds `latest` to every `type=semver` rule whatever its
