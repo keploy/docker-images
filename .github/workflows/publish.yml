@@ -95,6 +95,69 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ── A tier-1 image no other image needs, in a job of its own ────────
+  # keploy-ci-ebpf-objects is built FROM upstream like base-images, but it is
+  # NOT a base-images leg: node-image and derived-images need base-images, and
+  # a needs: on a fail-fast:false matrix fails if ANY leg fails, so a leg
+  # there holds every derived image hostage to it. This one fetches from
+  # snapshot.ubuntu.com and go.dev, and it fails for good once Canonical stops
+  # serving its pinned snapshot (see its Dockerfile); nothing builds FROM it,
+  # so it needs nothing and nothing needs it.
+  # amd64-only: snapshot.ubuntu.com, which pins its packages, does not serve
+  # ubuntu-ports.
+  standalone-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: ./keploy-ci-ebpf-objects
+            tag-prefix: 'ebpf-objects-'
+            platforms: linux/amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # Never a bare `latest` from this job: that tag is the base image's,
+          # set by base-images. See the note there.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern=${{ matrix.tag-prefix }}{{version}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}.{{minor}}
+            type=semver,pattern=${{ matrix.tag-prefix }}{{major}}
+            type=raw,value=${{ matrix.tag-prefix }}latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # ── Stage 2: Images that depend on keploy-ci ────────────────────────
   # Tier 2 — built FROM the base keploy-ci published by base-images above.
   # keploy-ci-node is its own job because tier 3 builds FROM it. Bundling it with

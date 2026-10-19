@@ -178,6 +178,37 @@ jobs:
           push: false
           tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}
 
+  # ── A tier-1 image no other image needs, in a job of its own ────────
+  # As in publish.yml: derived-images needs base-images, so a leg there that
+  # fails (this one fetches from snapshot.ubuntu.com and go.dev) would skip
+  # every derived build on a PR that has nothing to do with it.
+  standalone-images:
+    name: "${{ matrix.tag-prefix }} (${{ matrix.arch }})"
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: ./keploy-ci-ebpf-objects
+            tag-prefix: 'ebpf-objects-'
+            arch: amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.tag-prefix }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          tags: keploy-ci:${{ matrix.tag-prefix }}ci-${{ matrix.arch }}
+
   # ── Stage 2: images that derive FROM keploy-ci ─────────────────────
   # Exercise the BASE_TAG threading that publish.yml relies on.
   #
@@ -279,8 +310,8 @@ jobs:
                   if not ok:
                       errors.append(f"{name}: metadata-action flavor is {flavor!r}; want "
                                     + (repr(base_expr) if "" in prefixes else "'latest=false'"))
-          if seen != 4:
-              errors.append(f"expected 4 metadata-action steps in publish.yml, found {seen}")
+          if seen != 5:
+              errors.append(f"expected 5 metadata-action steps in publish.yml, found {seen}")
           for e in errors:
               print(f"::error::{e}")
           sys.exit(1 if errors else 0)
