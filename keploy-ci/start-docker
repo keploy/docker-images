@@ -1,31 +1,370 @@
 #!/usr/bin/env sh
-set -eu
+# start-docker: start the Docker daemon in this container (DinD) and return
+# once it answers, with DOCKERD_FLAGS for dockerd's own flags.
+#
+# containerd is started here, before dockerd, and dockerd attaches to it
+# (--containerd). Left to start it itself, dockerd gives the containerd it
+# manages a fixed 15 s (moby's startupTimeout, in 29.1.5
+# daemon/internal/libcontainerd/supervisor/remote_daemon.go) and quits with
+# "failed to start containerd: timeout waiting for containerd to start" when
+# a starved host's containerd takes longer: enterprise pipeline 11931 (steps
+# 194, 369, 402 and 418) lost four lanes to containerd sitting over 15 s,
+# silent, in its bolt metadata store's open.
+#
+# Each daemon is waited for while it is alive and making progress: until it
+# answers, it exits, or its log has not grown for START_DOCKER_SILENCE_CHECKS
+# looks in a row (600 by default; a hang guard, not a budget for a start that
+# works). A look is a second. The probe (`ctr version`, `docker info`) is
+# never cut short: one runs at a time, and each look sees whether it has
+# answered. dockerd listens on its socket before its init and answers only
+# after, and docker info asks containerd, the daemon that starves, for its
+# system info: a probe that takes long is still waited for, and its answer
+# taken when it comes. Only a daemon that stops progressing ends the wait,
+# and then the probe in flight is killed. A stall is said as it goes on,
+# every START_DOCKER_NOTICE_LOOKS quiet looks (30), with the daemon's last
+# log line, so a CI step cut by its own cap still says why.
+# START_DOCKER_PROBE_SECONDS (10) bounds only the one look start-docker takes
+# at a socket no pidfile names, which it has nothing else to watch on: a
+# daemon there that answers is reused, a socket that refuses (nothing
+# listens) is taken over, and one that listens and does not answer within
+# the bound fails the start, said: its daemon may be slow, not gone, and a
+# second one on the same root is not started.
+#
+# containerd runs as dockerd would run it: its root and state under
+# /var/lib/docker and /var/run/docker (the image's /var/lib/docker volume),
+# its socket where dockerd puts it, in a session of its own (moby starts it
+# with setsid, so it outlives the terminal that started it), at debug level
+# when dockerd is. And as dockerd would, it is restarted when it exits: a
+# watcher, in a session of its own too, starts it again and says so in its
+# log (/var/log/containerd.log).
+#
+# One start runs at a time (a lock); another waits for it. Run again, it
+# reuses what is there: a dockerd or a containerd an earlier start left
+# running (their pidfiles, written as each is started), waited for until it
+# answers, however far it got (an earlier start killed mid-wait); a
+# containerd its watcher is starting again; or a dockerd or containerd that
+# answers that no pidfile names. A start that fails stops what it started,
+# so the next one begins clean.
+#
+# DOCKERD_FLAGS (and /etc/docker/daemon.json) may not move what start-docker
+# puts in place (--data-root, --exec-root, --pidfile, --host, --containerd,
+# --config-file, in any spelling): containerd's root, its socket and
+# dockerd's pidfile and socket are fixed here. DOCKERD_FLAGS is split into
+# words, not globbed.
+#
+# Runs as a script, without job control: a daemon started in the background
+# here is not a process group leader, so setsid execs it in place and $! is
+# the daemon's pid.
+set -euf
 
-# Make sure runtime dirs exist
-mkdir -p /var/run /var/lib/docker
-
-# If already running, do nothing
-if docker info >/dev/null 2>&1; then
-  echo "Docker daemon already running"
-  exit 0
+CONTAINERD_ROOT=/var/lib/docker/containerd/daemon
+CONTAINERD_STATE=/var/run/docker/containerd/daemon
+CONTAINERD_SOCK=/var/run/docker/containerd/containerd.sock
+CONTAINERD_CONFIG=/var/run/docker/containerd/containerd.toml
+CONTAINERD_PIDFILE=/var/run/docker/containerd/containerd.pid
+WATCHER_PIDFILE=/var/run/docker/containerd/watcher.pid
+CONTAINERD_LOG=/var/log/containerd.log
+DOCKERD_LOG=/var/log/dockerd.log
+DOCKERD_PIDFILE=/var/run/docker.pid
+DOCKERD_STARTED=/var/run/docker/start-docker-dockerd.pid
+DOCKER_SOCK=/var/run/docker.sock
+LOCK=/var/run/start-docker.lock
+SILENCE="${START_DOCKER_SILENCE_CHECKS:-600}"
+PROBE_SECONDS="${START_DOCKER_PROBE_SECONDS:-10}"
+NOTICE="${START_DOCKER_NOTICE_LOOKS:-30}"
+for n in "$SILENCE" "$PROBE_SECONDS" "$NOTICE"; do
+  case "$n" in
+    '' | *[!0-9]* | 0*) echo "start-docker: START_DOCKER_SILENCE_CHECKS, START_DOCKER_PROBE_SECONDS and START_DOCKER_NOTICE_LOOKS are whole numbers, 1 or more (got '$n')" >&2; exit 2 ;;
+  esac
+done
+FLAGS="${DOCKERD_FLAGS:-}"
+fixed() {
+  echo "start-docker: $1 sets $2, which start-docker fixes (containerd's root and socket, dockerd's pidfile and socket)" >&2
+  exit 2
+}
+# shellcheck disable=SC2086 # FLAGS is a list of flags
+for f in $FLAGS; do
+  case "$f" in
+    --data-root | --data-root=* | --graph | --graph=* | --exec-root | --exec-root=* | --pidfile | --pidfile=* | \
+      --host | --host=* | --containerd | --containerd=* | --config-file | --config-file=*)
+      fixed DOCKERD_FLAGS "${f%%=*}"
+      ;;
+    --*) ;;
+    -?*)
+      # Short flags, run together as pflag takes them (-DH, -Htcp://x):
+      # each letter a flag, until one that takes a value (the rest of the
+      # word is that value).
+      g=${f#-}
+      while [ -n "$g" ]; do
+        c=${g%"${g#?}"} g=${g#?}
+        case "$c" in
+          H | p | g) fixed DOCKERD_FLAGS "-$c" ;;
+          l | G | b | e) break ;;
+        esac
+      done
+      ;;
+  esac
+done
+if [ -f /etc/docker/daemon.json ] && grep -qE '"(data-root|graph|exec-root|pidfile|hosts|containerd)"[[:space:]]*:' /etc/docker/daemon.json; then
+  fixed /etc/docker/daemon.json "$(grep -oE '"(data-root|graph|exec-root|pidfile|hosts|containerd)"' /etc/docker/daemon.json | head -n 1)"
 fi
 
-# Default flags
-FLAGS="${DOCKERD_FLAGS:-}"
+mkdir -p /var/run /var/lib/docker "$CONTAINERD_ROOT" "$CONTAINERD_STATE" /var/log
 
-# Start dockerd in background
-echo "Starting dockerd ${FLAGS} ..."
-dockerd ${FLAGS} >/var/log/dockerd.log 2>&1 &
+# probe CMD...: CMD answers within PROBE_SECONDS. Only for a daemon no
+# pidfile names, which start-docker has nothing else to watch on (a hang
+# guard); a daemon it waits on is probed without a bound (await).
+probe() {
+  timeout "$PROBE_SECONDS" "$@" >/dev/null 2>&1 9>&-
+}
 
-# Wait until it is ready
-for i in $(seq 1 60); do
-  if docker info >/dev/null 2>&1; then
-    echo "Docker daemon is ready"
-    exit 0
+# alive PID: the process runs (a zombie, exited but not yet reaped, does not).
+alive() {
+  [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status" 2>/dev/null
+}
+
+# named PID COMM: PID runs and is COMM (a pidfile's pid, not one reused).
+named() {
+  alive "$1" && [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "$2" ]
+}
+
+# is_watcher PID: PID runs and is start-docker's containerd watcher: one of
+# the words of its command line (its script's $0) is
+# start-docker-containerd-watcher, not any other sh. The words are read
+# NUL-separated (grep -z): the script before it is one word of many lines.
+is_watcher() {
+  alive "$1" && grep -qxz start-docker-containerd-watcher "/proc/$1/cmdline" 2>/dev/null
+}
+
+# pidfile_names FILE COMM: FILE names a running COMM, which it prints.
+pidfile_names() {
+  [ -s "$1" ] && named "$(cat "$1")" "$2" && cat "$1"
+}
+
+# containerd_named: containerd's pidfile names a running containerd.
+containerd_named() {
+  pidfile_names "$CONTAINERD_PIDFILE" containerd >/dev/null
+}
+
+# await NAME PID LOG PROBE...: returns 0 once PROBE answers; 1 once PID has
+# exited; 2 once LOG has not grown for SILENCE looks in a row. Every NOTICE
+# quiet looks before that, it says that the daemon has stalled. PROBE runs
+# in the background, one at a time, and is not cut short: each look sees
+# whether it has finished, and starts another once it has answered no.
+await() {
+  name=$1 pid=$2 log=$3
+  shift 3
+  last=-1 quiet=0 pp=""
+  while :; do
+    if [ -z "$pp" ]; then
+      "$@" >/dev/null 2>&1 9>&- &
+      pp=$!
+    fi
+    if ! alive "$pp"; then
+      if wait "$pp"; then
+        return 0
+      fi
+      pp=""
+    fi
+    if ! alive "$pid"; then
+      stop_probe
+      echo "$name exited before it answered" >&2
+      return 1
+    fi
+    size=$(wc -c <"$log" 2>/dev/null || echo 0)
+    if [ "$size" != "$last" ]; then
+      last=$size quiet=0
+    else
+      quiet=$((quiet + 1))
+    fi
+    if [ "$quiet" -ge "$SILENCE" ]; then
+      stop_probe
+      echo "$name has not answered, and its log has not grown in $SILENCE looks" >&2
+      return 2
+    fi
+    if [ "$quiet" -gt 0 ] && [ $((quiet % NOTICE)) = 0 ]; then
+      echo "$name has not answered, and its log has not grown in $quiet looks; still waiting while it runs (it fails after $SILENCE). The end of $log: $(tail -n 1 "$log" 2>/dev/null)" >&2
+    fi
+    sleep 1 9>&-
+  done
+}
+# stop_probe: the probe in flight, if any, is killed and reaped.
+stop_probe() {
+  if [ -n "$pp" ]; then
+    kill -9 "$pp" 2>/dev/null || true
+    wait "$pp" 2>/dev/null || true
+    pp=""
   fi
-  sleep 1
-done
+}
 
-echo "Docker daemon failed to start"
-tail -n 200 /var/log/dockerd.log || true
-exit 1
+# What this run started, killed when it fails (it failed: nothing of it is
+# kept): dockerd, then the watcher, then containerd, so that the watcher does
+# not start containerd again. Each is this shell's child and is reaped here,
+# so none is left when start-docker returns, not even as a zombie. The
+# watcher is sent SIGTERM, on which it kills and reaps a containerd it
+# started again (not this shell's child), and then exits. What an earlier
+# start left, and this one only waited for, is not this one's to kill.
+started="" watcher=""
+fail_start() {
+  echo "$1"
+  echo "--- the end of $DOCKERD_LOG ---"
+  tail -n 100 "$DOCKERD_LOG" 2>/dev/null || true
+  echo "--- the end of $CONTAINERD_LOG ---"
+  tail -n 100 "$CONTAINERD_LOG" 2>/dev/null || true
+  for p in $started; do
+    if [ "$p" = "$watcher" ]; then
+      kill -TERM "$p" 2>/dev/null || true
+    else
+      kill -9 "$p" 2>/dev/null || true
+    fi
+    wait "$p" 2>/dev/null || true
+  done
+  exit 1
+}
+
+# One start at a time. The lock is this shell's fd 9, closed for every
+# process it starts, so that a daemon does not hold it after it returns.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "another start-docker is running; waiting for it"
+  flock 9
+fi
+
+# A dockerd an earlier start left (the pidfile start-docker writes as it
+# starts it, or the one dockerd writes): waited for until it answers, not
+# started twice on one root.
+old=$(pidfile_names "$DOCKERD_STARTED" dockerd || pidfile_names "$DOCKERD_PIDFILE" dockerd || true)
+if [ -n "$old" ]; then
+  echo "dockerd ($old) is already running; waiting for it to answer"
+  if ! await dockerd "$old" "$DOCKERD_LOG" docker -H "unix://$DOCKER_SOCK" info; then
+    fail_start "Docker daemon failed to start"
+  fi
+  echo "Docker daemon is ready"
+  exit 0
+fi
+# A socket no pidfile names: one look, bounded. What answers is reused; what
+# listens and does not answer may be a slow daemon, not a gone one, and is
+# not started over; a socket that refuses (nothing listens) is taken over.
+if [ -S "$DOCKER_SOCK" ]; then
+  rc=0
+  probe docker -H "unix://$DOCKER_SOCK" info || rc=$?
+  case $rc in
+    0)
+      echo "Docker daemon already running"
+      exit 0
+      ;;
+    124)
+      echo "start-docker: something no pidfile names listens on $DOCKER_SOCK and did not answer in ${PROBE_SECONDS}s: not starting a second dockerd over it"
+      exit 1
+      ;;
+  esac
+fi
+
+# containerd logs at dockerd's level, as dockerd gives the containerd it
+# manages: debug with --debug (-D), else dockerd's --log-level (-l), info by
+# default.
+log_level() {
+  _level=info _debug=""
+  # shellcheck disable=SC2086 # FLAGS is a list of flags
+  set -- $FLAGS
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --debug | -D) _debug=1 ;;
+      # Go's bool flag values (strconv.ParseBool), as dockerd takes them.
+      --debug=* | -D=*)
+        case "${1#*=}" in
+          1 | t | T | true | TRUE | True) _debug=1 ;;
+          0 | f | F | false | FALSE | False) _debug="" ;;
+        esac
+        ;;
+      --log-level=* | -l=*) _level=${1#*=} ;;
+      --log-level | -l) [ "$#" -lt 2 ] || { _level=$2; shift; } ;;
+    esac
+    shift
+  done
+  if [ -n "$_debug" ]; then echo debug; else echo "$_level"; fi
+}
+level=$(log_level)
+
+# containerd: one its watcher is starting again, once it has; one an earlier
+# start left (its pidfile), waited for until it answers; else one that
+# answers on its socket; else started here.
+w=$(cat "$WATCHER_PIDFILE" 2>/dev/null || true)
+if [ -n "$w" ] && is_watcher "$w" && ! containerd_named; then
+  echo "containerd's watcher ($w) is starting it again; waiting for it"
+  if ! await "containerd's watcher" "$w" "$CONTAINERD_LOG" containerd_named; then
+    fail_start "containerd failed to start"
+  fi
+fi
+containerd_pid=""
+rc=1
+if containerd_pid=$(pidfile_names "$CONTAINERD_PIDFILE" containerd); then
+  echo "containerd ($containerd_pid) is already running; waiting for it to answer"
+  if ! await containerd "$containerd_pid" "$CONTAINERD_LOG" ctr --address "$CONTAINERD_SOCK" version; then
+    fail_start "containerd failed to start"
+  fi
+  echo "containerd ($containerd_pid) already answers on $CONTAINERD_SOCK"
+elif [ -S "$CONTAINERD_SOCK" ] && { rc=0; probe ctr --address "$CONTAINERD_SOCK" version || rc=$?; [ "$rc" = 0 ] || [ "$rc" = 124 ]; }; then
+  containerd_pid=""
+  if [ "$rc" = 124 ]; then
+    echo "start-docker: something no pidfile names listens on $CONTAINERD_SOCK and did not answer in ${PROBE_SECONDS}s: not starting a second containerd over it"
+    exit 1
+  fi
+  echo "containerd already answers on $CONTAINERD_SOCK (no pidfile names it: it has no watcher)"
+else
+  containerd_pid=""
+  cat >"$CONTAINERD_CONFIG" <<EOF
+version = 2
+root = "$CONTAINERD_ROOT"
+state = "$CONTAINERD_STATE"
+disabled_plugins = ["io.containerd.grpc.v1.cri"]
+
+[grpc]
+  address = "$CONTAINERD_SOCK"
+EOF
+  echo "Starting containerd ..."
+  setsid containerd --config "$CONTAINERD_CONFIG" --log-level "$level" >>"$CONTAINERD_LOG" 2>&1 9>&- &
+  containerd_pid=$!
+  started="$containerd_pid"
+  echo "$containerd_pid" >"$CONTAINERD_PIDFILE"
+  if ! await containerd "$containerd_pid" "$CONTAINERD_LOG" ctr --address "$CONTAINERD_SOCK" version; then
+    fail_start "containerd failed to start"
+  fi
+fi
+# The watcher: when containerd exits, it is started again, as dockerd's own
+# supervisor would; dockerd reconnects to it. It keeps containerd's pidfile.
+# Sent SIGTERM (a start that fails), it kills the last containerd it started
+# ($!, not $pid: a TERM can be taken between that start and pid=$!) and reaps
+# what it started, before it exits; a containerd it did not start is not its
+# to kill. One watcher at a time: one an earlier start left (its pidfile)
+# goes on.
+if [ -n "$containerd_pid" ] && ! { [ -s "$WATCHER_PIDFILE" ] && is_watcher "$(cat "$WATCHER_PIDFILE")"; }; then
+  # shellcheck disable=SC2016 # the watcher's script, expanded by its own sh
+  setsid sh -c '
+    pid=$1 config=$2 level=$3 log=$4 pidfile=$5
+    alive() { [ -r "/proc/$1/status" ] && ! grep -q "^State:[[:space:]]*Z" "/proc/$1/status" 2>/dev/null; }
+    trap "kill -9 \$! 2>/dev/null; wait; exit 0" TERM
+    while :; do
+      while alive "$pid"; do sleep 1; done
+      echo "start-docker: containerd (pid $pid) exited; starting it again" >>"$log"
+      containerd --config "$config" --log-level "$level" >>"$log" 2>&1 &
+      pid=$!
+      echo "$pid" >"$pidfile"
+      sleep 1
+    done' start-docker-containerd-watcher "$containerd_pid" "$CONTAINERD_CONFIG" "$level" "$CONTAINERD_LOG" "$CONTAINERD_PIDFILE" >/dev/null 2>&1 9>&- &
+  watcher=$!
+  started="$watcher $started"
+  echo "$watcher" >"$WATCHER_PIDFILE"
+  echo "containerd ($containerd_pid) is up; its watcher ($watcher) starts it again should it exit"
+fi
+
+echo "Starting dockerd ${FLAGS} ..."
+# shellcheck disable=SC2086 # FLAGS is a list of flags
+dockerd --containerd="$CONTAINERD_SOCK" ${FLAGS} >>"$DOCKERD_LOG" 2>&1 9>&- &
+dockerd_pid=$!
+started="$dockerd_pid $started"
+echo "$dockerd_pid" >"$DOCKERD_STARTED"
+if ! await dockerd "$dockerd_pid" "$DOCKERD_LOG" docker -H "unix://$DOCKER_SOCK" info; then
+  fail_start "Docker daemon failed to start"
+fi
+echo "Docker daemon is ready"
