@@ -53,6 +53,49 @@ image: ghcr.io/keploy/keploy-ci:kube-1.2.40
 
 Tag: `ghcr.io/keploy/keploy-ci:kube-<version>`.
 
+### keploy-ci-ebpf-objects
+
+The toolchain keploy/ebpf's committed BPF objects are built with (the recipe in
+its `compile.sh` header), pinned, for its `objects-reproducible` lane: that lane
+rebuilds every committed object from scratch and fails on any byte that differs,
+so the toolchain must not move under it, and the lane must not wait on an Ubuntu
+mirror to install it.
+
+**Contents:** Ubuntu 22.04 (by index digest), `clang-14` and `llvm-14`
+1:14.0.0-1ubuntu1.1, `libbpf-dev` 1:0.5.0-1ubuntu22.04.1, `linux-libc-dev`,
+`libc6-dev` and their arm64 cross packages, `git`, `ca-certificates`, and Go
+1.27.1 (`GOTOOLCHAIN=local`). Every package installed comes from one
+snapshot.ubuntu.com snapshot and the recipe's packages are pinned with
+`=version`, so a rebuild resolves the same versions or fails; Go is checked
+against its SHA-256. amd64 only: the snapshot service does not serve
+ubuntu-ports. It is published by a job of its own (`standalone-images`), not as
+a `base-images` leg, so that it never holds the derived images back.
+
+**Use it by digest**, not by tag: the lane's result is only meaningful for one
+fixed toolchain. Read the digest from the tag once the release's publish run has
+finished, not from a build log:
+
+```bash
+docker buildx imagetools inspect ghcr.io/keploy/keploy-ci:ebpf-objects-<version> --format '{{.Manifest.Digest}}'
+```
+
+```yaml
+# Woodpecker step in keploy/ebpf
+image: ghcr.io/keploy/keploy-ci:ebpf-objects-<version>@<digest>
+```
+
+A version changed here can change the bytes the recipe builds, so moving the
+lane to a new digest is a keploy/ebpf change of its own, which rebuilds and
+recommits its objects with that image when they differ. Once Canonical stops
+serving the pinned snapshot (its stated aim is at least the last two years), the
+image no longer builds and the snapshot has to move, which is such a change.
+Never prune a published `ebpf-objects-*` image from GHCR, nor an untagged
+`keploy-ci` version a lane's digest names: re-running a publish job pushes the
+tag again under a new digest and leaves the pinned one untagged, lanes pull it
+by digest, and it cannot be rebuilt after that window.
+
+Tag: `ghcr.io/keploy/keploy-ci:ebpf-objects-<version>`.
+
 ## The CI object store: s3.sh, not `mc`
 
 None of these images ships MinIO's `mc` any more. The CI store behind
@@ -88,7 +131,7 @@ The images form a three-tier chain, and `publish.yml` builds them in that order:
 
 | tier | images | built FROM |
 |---|---|---|
-| 1 | `keploy-ci`, `slim`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build` | upstream (debian/alpine/golang) |
+| 1 | `keploy-ci`, `slim`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build`; `ebpf-objects` (its own job) | upstream (debian/alpine/golang/ubuntu) |
 | 2 | `node`, `java`, `python`, `kube` | `keploy-ci:<version>` |
 | 3 | `playwright`, `lighthouse` | `keploy-ci:node-<version>` |
 
