@@ -52,7 +52,11 @@ RUN set -eux; \
     rm -f /tmp/cross-probe; \
     pkg-config --exists gl x11 xcursor xi xinerama xrandr xxf86vm
 
-ARG GOLANGCI_LINT_VERSION=v2.13.2
+# v2.14.0: the first that reads go1.27.2's export data. v2.13.1 and v2.13.2,
+# under go1.27.2, fail every package's typecheck on its stdlib imports
+# ("could not import cmp (... export data version 5 is greater than maximum
+# supported version 4)"), and golint-1.2.46 shipped v2.13.2 on go1.27.2.
+ARG GOLANGCI_LINT_VERSION=v2.14.0
 
 # golangci-lint is installed by hand rather than by piping upstream's
 # install.sh, which cannot install any version we are able to use here.
@@ -73,6 +77,12 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 # refuses to run when its build Go is older than the module's target, so every
 # version new enough for a `go 1.27.0` module hits that bug. Matching the
 # checksum line on the EXACT filename avoids it and keeps verification intact.
+#
+# Ends by linting a module that imports the stdlib, with this image's Go, so a
+# golangci-lint that cannot read this Go's export data fails here, not in a
+# lint lane: `golangci-lint --version`, the check before, passed v2.13.2 on
+# go1.27.2, which then could not typecheck a single package. Its caches go
+# with the probe, and the telemetry counters its go writes.
 RUN set -eux; \
     version="${GOLANGCI_LINT_VERSION#v}"; \
     arch="$(dpkg --print-architecture)"; \
@@ -86,4 +96,11 @@ RUN set -eux; \
     tar -xzf /tmp/golangci-lint.tar.gz -C /tmp; \
     install "/tmp/${name}/golangci-lint" /usr/local/bin/golangci-lint; \
     rm -rf /tmp/golangci-lint.tar.gz /tmp/golangci-lint-checksums.txt "/tmp/${name}"; \
-    golangci-lint --version
+    golangci-lint --version; \
+    mkdir -p /tmp/lint-probe; \
+    printf 'module probe\n\ngo 1.27.0\n' >/tmp/lint-probe/go.mod; \
+    printf 'package probe\n\nimport (\n\t"cmp"\n\t"fmt"\n\t"slices"\n)\n\n// Largest is the largest of xs.\nfunc Largest(xs []int) int { return slices.MaxFunc(xs, cmp.Compare[int]) }\n\n// Show formats x.\nfunc Show(x int) string { return fmt.Sprint(x) }\n' >/tmp/lint-probe/probe.go; \
+    cd /tmp/lint-probe; \
+    GOCACHE=/tmp/lint-probe-cache GOLANGCI_LINT_CACHE=/tmp/lint-probe-lintcache GOFLAGS=-mod=mod golangci-lint run ./...; \
+    cd /; \
+    rm -rf /tmp/lint-probe /tmp/lint-probe-cache /tmp/lint-probe-lintcache /root/.config/go
