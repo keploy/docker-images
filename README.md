@@ -11,7 +11,7 @@ A Docker-in-Docker image with Go and common CI dependencies for running Keploy t
 **Features:**
 - Based on `debian:trixie-slim`, with Docker Engine 29.1 from Docker's apt
   repository (dockerd, docker CLI, buildx, compose, containerd)
-- Go 1.27.2, the one Go patch of every image here that has Go; no C
+- Go 1.27.3, the one Go patch of every image here that has Go; no C
   toolchain (Linux builds use `CGO_ENABLED=0`; Windows cross-compiles use
   `keploy-ci-go-build`)
 - Common CI utilities (bash, curl, git, jq, sudo, zstd, etc.); no MinIO client
@@ -65,7 +65,7 @@ mirror to install it.
 **Contents:** Ubuntu 22.04 (by index digest), `clang-14` and `llvm-14`
 1:14.0.0-1ubuntu1.1, `libbpf-dev` 1:0.5.0-1ubuntu22.04.1, `linux-libc-dev`,
 `libc6-dev` and their arm64 cross packages, `git`, `ca-certificates`, and Go
-1.27.2 (`GOTOOLCHAIN=local`). Every package installed comes from one
+1.27.3 (`GOTOOLCHAIN=local`). Every package installed comes from one
 snapshot.ubuntu.com snapshot and the recipe's packages are pinned with
 `=version`, so a rebuild resolves the same versions or fails; Go is checked
 against its SHA-256. amd64 only: the snapshot service does not serve

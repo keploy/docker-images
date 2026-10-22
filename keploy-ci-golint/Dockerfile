@@ -4,7 +4,7 @@
 # Used by: golangci-lint.yml
 # By digest: golang:1.27-bookworm floats to each new patch, and this image's Go
 # must be the patch every CI image ships (keploy-ci/Dockerfile's GO_VERSION).
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
 
 # The C toolchain pieces enterprise's lint needs for its cgo, which the
 # typecheck runs (cgo code is type-checked from what cgo generates):
