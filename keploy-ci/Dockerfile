@@ -12,9 +12,9 @@ FROM debian:trixie-slim
 # splits, each lane rebuilding what the other cached. docker-build.yml holds
 # them to one. GO_SHA256_* are go.dev's SHA-256 of each release tarball
 # (https://go.dev/dl/?mode=json), checked before it is unpacked.
-ARG GO_VERSION=1.27.2
-ARG GO_SHA256_AMD64=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
-ARG GO_SHA256_ARM64=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
+ARG GO_VERSION=1.27.3
+ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
 # Keep Docker "major.minor" aligned with the latest stable release.
 ARG DOCKER_MAJOR_MINOR=29.1
 # Provided automatically by BuildKit/buildx; fallback to dpkg when unset.
