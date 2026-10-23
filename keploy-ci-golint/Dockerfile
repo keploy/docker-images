@@ -52,11 +52,14 @@ RUN set -eux; \
     rm -f /tmp/cross-probe; \
     pkg-config --exists gl x11 xcursor xi xinerama xrandr xxf86vm
 
-# v2.14.0: the first that reads go1.27.2's export data. v2.13.1 and v2.13.2,
+# v2.15.0, built with go1.27.0 and golang.org/x/tools v0.52.0, reads this
+# image's go1.27.3 export data (the probe at the end of the next step lints a
+# stdlib-importing module with it). Nothing older than v2.14.0 will do: v2.14.0
+# was the first that reads go1.27.2's export data, and v2.13.1 and v2.13.2,
 # under go1.27.2, fail every package's typecheck on its stdlib imports
 # ("could not import cmp (... export data version 5 is greater than maximum
-# supported version 4)"), and golint-1.2.46 shipped v2.13.2 on go1.27.2.
-ARG GOLANGCI_LINT_VERSION=v2.14.0
+# supported version 4)"); golint-1.2.46 shipped v2.13.2 on go1.27.2.
+ARG GOLANGCI_LINT_VERSION=v2.15.0
 
 # golangci-lint is installed by hand rather than by piping upstream's
 # install.sh, which cannot install any version we are able to use here.
@@ -81,8 +84,14 @@ ARG GOLANGCI_LINT_VERSION=v2.14.0
 # Ends by linting a module that imports the stdlib, with this image's Go, so a
 # golangci-lint that cannot read this Go's export data fails here, not in a
 # lint lane: `golangci-lint --version`, the check before, passed v2.13.2 on
-# go1.27.2, which then could not typecheck a single package. Its caches go
-# with the probe, and the telemetry counters its go writes.
+# go1.27.2, which then could not typecheck a single package. The probe's go.mod
+# targets this image's own Go (`go env GOVERSION`: 1.27.3, the go line keploy
+# and enterprise declare), not a fixed 1.27.0, so golangci-lint's refusal to
+# lint a module newer than its build Go (above; it compares language versions,
+# 1.27 to 1.27) is also met here: after a Go minor bump of this image, a
+# release still built with the older minor fails this build, not the lint
+# lanes of the repos that move to the new Go. Its caches go with the probe,
+# and the telemetry counters its go writes.
 RUN set -eux; \
     version="${GOLANGCI_LINT_VERSION#v}"; \
     arch="$(dpkg --print-architecture)"; \
@@ -98,7 +107,8 @@ RUN set -eux; \
     rm -rf /tmp/golangci-lint.tar.gz /tmp/golangci-lint-checksums.txt "/tmp/${name}"; \
     golangci-lint --version; \
     mkdir -p /tmp/lint-probe; \
-    printf 'module probe\n\ngo 1.27.0\n' >/tmp/lint-probe/go.mod; \
+    printf 'module probe\n\ngo %s\n' "$(go env GOVERSION | sed 's/^go//')" >/tmp/lint-probe/go.mod; \
+    cat /tmp/lint-probe/go.mod; \
     printf 'package probe\n\nimport (\n\t"cmp"\n\t"fmt"\n\t"slices"\n)\n\n// Largest is the largest of xs.\nfunc Largest(xs []int) int { return slices.MaxFunc(xs, cmp.Compare[int]) }\n\n// Show formats x.\nfunc Show(x int) string { return fmt.Sprint(x) }\n' >/tmp/lint-probe/probe.go; \
     cd /tmp/lint-probe; \
     GOCACHE=/tmp/lint-probe-cache GOLANGCI_LINT_CACHE=/tmp/lint-probe-lintcache GOFLAGS=-mod=mod golangci-lint run ./...; \
