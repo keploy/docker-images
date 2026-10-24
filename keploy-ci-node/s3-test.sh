@@ -217,10 +217,15 @@ exit "\$rc"
 EOF
 chmod +x "$BIN/curl"
 # A fake clock for the cases about time. With FAKE_CLOCK naming a file,
-# `date +%s` reads it and `sleep N` (s3.sh's backoff, the stub's sleep=N, a
-# test's slow reader) adds N to it instead of sleeping, so what such a case
-# asserts is decided by what s3.sh does, never by how fast the runner is.
-# Without FAKE_CLOCK both are the real commands.
+# `date +%s` reads it and `sleep N` (s3.sh's backoff, the stub's sleep=N) adds
+# N to it instead of sleeping, so what such a case asserts is decided by what
+# s3.sh does, never by how fast the runner is. FAKE_SLEEP_LATE=N makes every
+# such sleep end N s late, as a sleep does on a loaded box. Without FAKE_CLOCK
+# both are the real commands. The stub sleep and tick (below) write the clock
+# file whole (a new file renamed over it), so a reader never finds it empty.
+# Neither variable comes from the runner's environment: only the cases that
+# need them set them.
+unset FAKE_CLOCK FAKE_SLEEP_LATE
 REAL_DATE=$(command -v date); REAL_SLEEP=$(command -v sleep)
 cat > "$BIN/date" <<EOF
 #!/bin/sh
@@ -229,7 +234,9 @@ exec $REAL_DATE "\$@"
 EOF
 cat > "$BIN/sleep" <<EOF
 #!/bin/sh
-if [ -n "\${FAKE_CLOCK:-}" ]; then echo \$(( \$(cat "\$FAKE_CLOCK") + \$1 )) > "\$FAKE_CLOCK"; exit 0; fi
+if [ -n "\${FAKE_CLOCK:-}" ]; then
+  echo \$(( \$(cat "\$FAKE_CLOCK") + \$1 + \${FAKE_SLEEP_LATE:-0} )) > "\$FAKE_CLOCK.\$\$" && mv -f "\$FAKE_CLOCK.\$\$" "\$FAKE_CLOCK"; exit 0
+fi
 exec $REAL_SLEEP "\$@"
 EOF
 chmod +x "$BIN/date" "$BIN/sleep"
@@ -859,6 +866,11 @@ PATH="$BIN:$PATH" MINIO_ENDPOINT=http://h/path MINIO_ACCESS_KEY=ak MINIO_SECRET_
 # exact calls, never an elapsed time. Progress is a request answered in full
 # (a 2xx, curl exit 0); each starts S3_OP_TIMEOUT again.
 clk() { echo 1000 > "$T/clock"; }
+# tick N: N s pass on the fake clock at once, written as the stub's sleep N
+# writes them under FAKE_CLOCK (with no FAKE_SLEEP_LATE), for a case's own
+# side of a pipe (stdin that arrives late, a reader that stops). Nothing
+# waits: no real time is spent.
+tick() { echo $(( $(cat "$T/clock") + $1 )) > "$T/clock.tick" && mv -f "$T/clock.tick" "$T/clock"; }
 opt() { # opt VAR=VALUE... VERB ARGS...: s3.sh on the fake clock, stub curl
   _opt_env=
   while [ $# -gt 0 ]; do case $1 in *=*) _opt_env="$_opt_env $1"; shift ;; *) break ;; esac; done
@@ -883,19 +895,41 @@ opt S3_RETRIES=10 S3_RETRY_DELAY=1 S3_OP_TIMEOUT=3 stat woodpecker/a/b > /dev/nu
 # The stdin side waits until s3.sh has set its deadline (its first temp file
 # appears), then lets the fake clock pass it; or until s3.sh has exited, so a
 # regression that ends it before then fails this case instead of hanging it.
+# Only tick moves the clock here (the plan has no sleep=, and a backoff of
+# S3_RETRY_DELAY=0 adds nothing), so it ends at 1004 exactly: a tick that
+# moved it by anything else, or not at all, fails this case.
 clk; plan "0 200 - etag=$OBJMD5" "0 200 $T/obj etag=$OBJMD5"; mkdir "$T/ptmp"; rm -f "$T/prc"
-{ until [ -n "$(ls -A "$T/ptmp")" ] || [ -e "$T/prc" ]; do sleep 1; done; FAKE_CLOCK=$T/clock PATH="$BIN:$PATH" sleep 4; cat "$T/obj"; } \
+{ until [ -n "$(ls -A "$T/ptmp")" ] || [ -e "$T/prc" ]; do sleep 1; done; tick 4; cat "$T/obj"; } \
   | { rc=0; opt TMPDIR="$T/ptmp" S3_RETRIES=3 S3_RETRY_DELAY=0 S3_OP_TIMEOUT=3 put - woodpecker/a/obj > /dev/null 2> "$T/err" || rc=$?; echo "$rc" > "$T/prc"; }
 rc=$(cat "$T/prc"); rm -rf "$T/ptmp" "$T/prc"
-[ "$rc" -eq 0 ] && [ "$(ncalls)" -eq 2 ] && cmp -s "$T/obj" "$ST/uploaded" \
+[ "$rc" -eq 0 ] && [ "$(ncalls)" -eq 2 ] && cmp -s "$T/obj" "$ST/uploaded" && [ "$(cat "$T/clock")" = 1004 ] \
   && pass "S3_OP_TIMEOUT: its time starts at the first request, not before (stdin 4 s late, OP=3)" \
-  || fail "op timeout first request: rc=$rc calls=$(ncalls) err=$(cat "$T/err")"
+  || fail "op timeout first request: rc=$rc calls=$(ncalls) clock=$(cat "$T/clock") err=$(cat "$T/err")"
 # A 503 is not progress: with a constant 1 s backoff, calls at 1000, 1001 and
 # 1002, then the deadline (were it progress, all 10 attempts would be made).
 clk; plan "0 503 -"
 opt S3_RETRIES=10 S3_RETRY_DELAY=1 S3_RETRY_MAX_DELAY=1 S3_OP_TIMEOUT=3 stat woodpecker/a/b > /dev/null 2> "$T/err"; rc=$?
 [ "$rc" -eq 5 ] && [ "$(ncalls)" -eq 3 ] && pass "S3_OP_TIMEOUT: an error answer is not progress (3 calls at a constant backoff)" \
   || fail "op timeout 503 constant: rc=$rc calls=$(ncalls) err=$(cat "$T/err")"
+# Once the deadline is reached, no request is made, whatever the retry gate
+# saw before its wait. Here every backoff ends 2 s late, as on a loaded box:
+# the 503 at 1000 is retried, its 1 s wait (to 1001, before the deadline,
+# 1003) ends at 1003, and the second attempt is refused before any request,
+# as curl's timeout (28): exit 5, one call, the clock at 1003.
+clk; plan "0 503 -"
+opt FAKE_SLEEP_LATE=2 S3_RETRIES=10 S3_RETRY_DELAY=1 S3_RETRY_MAX_DELAY=1 S3_OP_TIMEOUT=3 stat woodpecker/a/b > /dev/null 2> "$T/err"; rc=$?
+[ "$rc" -eq 5 ] && [ "$(ncalls)" -eq 1 ] && [ "$(cat "$T/clock")" = 1003 ] \
+  && grep -q 'gave up after 2 attempt(s), S3_OP_TIMEOUT=3s reached without progress before the next retry: curl exit 28$' "$T/err" \
+  && pass "S3_OP_TIMEOUT: no request is made once the deadline is reached (a wait that ended late; exit 5)" \
+  || fail "op timeout deadline reached: rc=$rc calls=$(ncalls) clock=$(cat "$T/clock") err=$(cat "$T/err")"
+# One second less late, 1 s is left: the request is made, its connect timeout
+# cut to that second.
+clk; plan "0 503 -"
+opt FAKE_SLEEP_LATE=1 S3_RETRIES=10 S3_RETRY_DELAY=1 S3_RETRY_MAX_DELAY=1 S3_OP_TIMEOUT=3 stat woodpecker/a/b > /dev/null 2> "$T/err"; rc=$?
+[ "$rc" -eq 5 ] && [ "$(ncalls)" -eq 2 ] && [ "$(cat "$T/clock")" = 1002 ] \
+  && sed -n 2p "$ST/argv.log" | grep -q -- '--connect-timeout 1 ' \
+  && pass "S3_OP_TIMEOUT: with 1 s left a request is still made, its connect timeout cut to 1 s" \
+  || fail "op timeout 1 s left: rc=$rc calls=$(ncalls) clock=$(cat "$T/clock") err=$(cat "$T/err") argv=$(cat "$ST/argv.log")"
 # Nor is a 2xx whose body did not arrive whole: a 200 that stalls until 1003
 # (curl 28) leaves no time for a retry.
 clk; plan "28 200 $T/obj sleep=3"
@@ -925,14 +959,16 @@ opt S3_RETRIES=3 S3_RETRY_DELAY=0 S3_OP_TIMEOUT=2 S3_PARALLEL=1 S3_PART_BYTES=10
   || fail "op timeout cat ranges: rc=$rc calls=$(ncalls) err=$(cat "$T/err")"
 # The reader taking a range is progress too: a reader that stops for 3 s, a
 # whole S3_OP_TIMEOUT, while a range is written to it is not taken for a
-# store that does not answer, and the next range is still fetched.
+# store that does not answer, and the next range is still fetched. As above,
+# only the reader's tick moves the clock, so it ends at 1003 exactly.
 clk; plan "0 200 $T/big4 etag=auto"
 { rc=0; opt S3_RETRIES=3 S3_RETRY_DELAY=0 S3_OP_TIMEOUT=2 S3_PARALLEL=1 S3_PART_BYTES=1048576 cat woodpecker/a/b 2> "$T/err" || rc=$?; echo "$rc" > "$T/rc"; } \
-  | { dd bs=65536 count=4 2>/dev/null; FAKE_CLOCK=$T/clock PATH="$BIN:$PATH" sleep 3; cat; } > "$T/cat.out"
+  | { dd bs=65536 count=4 2>/dev/null; tick 3; cat; } > "$T/cat.out"
 rc=$(cat "$T/rc")
 [ "$rc" -eq 0 ] && [ "$(ncalls)" -eq 5 ] && cmp -s "$T/big4" "$T/cat.out" && ! grep -qE 'retrying|gave up' "$T/err" \
+  && [ "$(cat "$T/clock")" = 1003 ] \
   && pass "S3_OP_TIMEOUT: a slow reader is not taken for a store that does not answer" \
-  || fail "op timeout slow reader: rc=$rc calls=$(ncalls) err=$(cat "$T/err")"
+  || fail "op timeout slow reader: rc=$rc calls=$(ncalls) clock=$(cat "$T/clock") err=$(cat "$T/err")"
 rm -f "$T/big4" "$T/cat.out"
 # presign signs locally, so with S3_OP_TIMEOUT too it needs no temp file: it
 # works where there is no temp directory to make one in.
