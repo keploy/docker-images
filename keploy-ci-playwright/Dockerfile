@@ -1,6 +1,7 @@
 # keploy-ci-playwright: keploy-ci-node + Playwright system deps + browsers + MongoDB tools
 # Pre-installs the OS-level libraries Chromium needs (fonts, libatk, libnss, etc.),
-# THE CHROMIUM BROWSER ITSELF, MongoDB Database Tools, and CI utilities.
+# THE CHROMIUM BROWSER ITSELF, MongoDB Database Tools, certutil (so Chromium
+# trusts keploy's CA), and CI utilities.
 # Used by: playwright.yml, playwright-e2e.yml (Woodpecker CI)
 # The base tag is a BUILD ARG, not a frozen literal.
 #
@@ -36,6 +37,14 @@ ARG MONGO_TOOLS_VERSION=100.10.0
 # Microsoft's CDN (Chrome 184.3 MiB + Headless Shell 114.7 MiB) — about five
 # minutes, on every one of ~16 lanes, on the critical path.
 ARG PLAYWRIGHT_VERSION=1.62.1
+
+# Debian trixie's libnss3-tools (certutil; see its install step below), from
+# the same nss build as the libnss3 the image already has (2:3.110-1+deb13u4
+# on node-1.2.49). When Debian replaces this build (a security update or a
+# point release), the archive stops serving it and the build fails at that
+# install step, naming the version: set this to what
+# `apt-cache policy libnss3-tools` shows then.
+ARG NSS_TOOLS_VERSION=2:3.110-1+deb13u4
 
 RUN set -eux; \
     # ── Playwright system dependencies (OS packages only).
@@ -98,12 +107,26 @@ RUN set -eux; \
     # ── CI utilities
     apt-get install -y --no-install-recommends zip zstd ffmpeg; \
     \
+    # ── certutil (libnss3-tools), so Chromium trusts keploy's CA.
+    # On Linux, Chromium takes its trusted CAs from the user's NSS database
+    # ($HOME/.pki/nssdb), not from the system store. keploy (record, test, mock
+    # record, mock replay) adds its CA there with certutil while it runs, as it
+    # does to the system store, and removes it at exit. Without certutil keploy
+    # warns once and adds nothing, so Chromium refuses keploy's certificate:
+    # every HTTPS call a Playwright test makes through keploy ends in a failed
+    # handshake ("remote error: tls: unknown certificate" in keploy's log) and is
+    # neither recorded nor served. libnss3 itself comes from install-deps above;
+    # certutil is in this separate package.
+    apt-get install -y --no-install-recommends "libnss3-tools=${NSS_TOOLS_VERSION}"; \
+    \
     # ── Cleanup
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /tmp/* /root/.npm/_cacache; \
     \
     # ── Verify
     mongorestore --version; \
+    command -v certutil; \
+    dpkg-query -W libnss3 libnss3-tools; \
     # The browsers are the whole point of this image now, and an empty directory
     # would ship silently: every consumer's probe checks only that the path is
     # non-empty, so a half-installed tree reads as "baked" and the tests then
