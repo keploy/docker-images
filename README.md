@@ -97,6 +97,59 @@ by digest, and it cannot be rebuilt after that window.
 
 Tag: `ghcr.io/keploy/keploy-ci:ebpf-objects-<version>`.
 
+### keploy-ci-woodpecker-agent
+
+The Woodpecker CI agent, built from upstream's source at a pinned tag and
+commit with the patches in `keploy-ci-woodpecker-agent/patches/`, for the Linux
+agents that run in docker. It takes upstream's `woodpeckerci/woodpecker-agent`
+image's place at the same version, with the same settings.
+
+**Why:** the v3.20.1 agent counts `WOODPECKER_RETRY_TIMEOUT` (2 minutes by
+default) from the moment an RPC began, not from its first failure. `Wait()`
+stays open for the whole workflow, so when the connection to the server drops
+once after that, the agent does not retry: it cancels every workflow it is
+running, and every step shows as killed. Patch 0001 is upstream's open fix,
+woodpecker-ci/woodpecker#7111 (issue #7110), applied to v3.20.1: the window
+counts from the first failure. Patch 0002 adds tests for the failure as it
+happened on our agents: a `Wait()` that outlived the window and then got the
+server's `too_many_pings` GOAWAY, at production scale too (a 2 minute window
+and a poll open for 30 minutes), and the window's edges. Patch 0003 starts the
+window over once the agent has reconnected, so a drop soon after a
+reconnection (a server restart followed by another drop, or a storm of
+GOAWAYs) is retried instead of being counted against the outage before it.
+The build runs the patched package's tests and fails if one fails.
+
+keploy's agents run `WOODPECKER_RETRY_TIMEOUT=0`, which retries forever, and
+at 0 this image retries as v3.20.1 does. The fixes matter for a finite window:
+upstream's users, and anyone who sets one.
+
+A finite window rides out only outages well shorter than itself. When the agent
+gives up, the runner cancels every workflow on the agent. While the connection
+is down, every RPC returns `errNotConnected` without calling the server, so the
+agent's retries do not bring the connection back. Only gRPC's reconnect backoff
+does: 1 s, growing 1.6x per attempt to 120 s, with about 20% jitter, and a
+connect attempt can take 20 s or more. The agent also stops up to one retry
+interval (at most 15 s) before the window ends. With a 6 s window, an outage of
+60% of it gave up in 5 of 6 runs. With a 2 minute window, 1 of 12 runs gave up
+at 60%, and none at 50%. So choose a window of minutes, about twice the longest
+outage to ride out, or 0.
+
+**Contents:** the `woodpecker-agent` binary (reporting version
+`<tag>-keploy.<n>`), CA certificates, timezone data, and upstream's
+`/etc/woodpecker` layout, on `scratch`, as upstream's image. amd64 only: every
+Linux agent host is x86_64. The macOS and Windows agents run the binary
+natively and do not use this image.
+
+```yaml
+# The agent's compose service
+image: ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>
+```
+
+When an upstream release carries these fixes, move the agents back to
+upstream's image at that release and delete this directory.
+
+Tag: `ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>`.
+
 ## The CI object store: s3.sh, not `mc`
 
 None of these images ships MinIO's `mc` any more. The CI store behind
