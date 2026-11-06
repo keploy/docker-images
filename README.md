@@ -119,10 +119,20 @@ reconnection (a server restart followed by another drop, or a storm of
 GOAWAYs) is retried instead of being counted against the outage before it.
 The build runs the patched package's tests and fails if one fails.
 
-An outage longer than the window still ends with the agent giving up, and
-the runner then cancels every workflow on the agent, so choose
-`WOODPECKER_RETRY_TIMEOUT` longer than the outages to ride out, or 0 to
-retry forever.
+keploy's agents run `WOODPECKER_RETRY_TIMEOUT=0`, which retries forever, and
+at 0 this image retries as v3.20.1 does. The fixes matter for a finite window:
+upstream's users, and anyone who sets one.
+
+A finite window rides out only outages well shorter than itself. When the agent
+gives up, the runner cancels every workflow on the agent. While the connection
+is down, every RPC returns `errNotConnected` without calling the server, so the
+agent's retries do not bring the connection back. Only gRPC's reconnect backoff
+does: 1 s, growing 1.6x per attempt to 120 s, with about 20% jitter, and a
+connect attempt can take 20 s or more. The agent also stops up to one retry
+interval (at most 15 s) before the window ends. With a 6 s window, an outage of
+60% of it gave up in 5 of 6 runs. With a 2 minute window, 1 of 12 runs gave up
+at 60%, and none at 50%. So choose a window of minutes, about twice the longest
+outage to ride out, or 0.
 
 **Contents:** the `woodpecker-agent` binary (reporting version
 `<tag>-keploy.<n>`), CA certificates, timezone data, and upstream's
