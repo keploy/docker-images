@@ -123,6 +123,11 @@ jobs:
           - context: ./keploy-ci-ebpf-objects
             tag-prefix: 'ebpf-objects-'
             platforms: linux/amd64
+          # Built from upstream's source too, and nothing builds FROM it.
+          # amd64-only: every Linux Woodpecker agent host is x86_64.
+          - context: ./keploy-ci-woodpecker-agent
+            tag-prefix: 'woodpecker-agent-'
+            platforms: linux/amd64
 
     steps:
       - name: Checkout repository

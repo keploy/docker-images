@@ -97,6 +97,41 @@ by digest, and it cannot be rebuilt after that window.
 
 Tag: `ghcr.io/keploy/keploy-ci:ebpf-objects-<version>`.
 
+### keploy-ci-woodpecker-agent
+
+The Woodpecker CI agent, built from upstream's source at a pinned tag and
+commit with the patches in `keploy-ci-woodpecker-agent/patches/`, for the Linux
+agents that run in docker. It takes upstream's `woodpeckerci/woodpecker-agent`
+image's place at the same version, with the same settings.
+
+**Why:** the v3.20.1 agent counts `WOODPECKER_RETRY_TIMEOUT` (2 minutes by
+default) from the moment an RPC began, not from its first failure. `Wait()`
+stays open for the whole workflow, so when the connection to the server drops
+once after that, the agent does not retry: it cancels every workflow it is
+running, and every step shows as killed. Patch 0001 is upstream's open fix,
+woodpecker-ci/woodpecker#7111 (issue #7110), applied to v3.20.1. Patch 0002
+adds tests for the failure as it happened on our agents: a `Wait()` that
+outlived the window and then got the server's `too_many_pings` GOAWAY, and an
+agent with no window (`WOODPECKER_RETRY_TIMEOUT=0`) whose retry interval must
+keep growing. The build runs the patched package's tests and fails if one
+fails.
+
+**Contents:** the `woodpecker-agent` binary (reporting version
+`<tag>-keploy.<n>`), CA certificates, timezone data, and upstream's
+`/etc/woodpecker` layout, on `scratch`, as upstream's image. amd64 only: every
+Linux agent host is x86_64. The macOS and Windows agents run the binary
+natively and do not use this image.
+
+```yaml
+# The agent's compose service
+image: ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>
+```
+
+When an upstream release carries the fix, move the agents back to upstream's
+image at that release and delete this directory.
+
+Tag: `ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>`.
+
 ## The CI object store: s3.sh, not `mc`
 
 None of these images ships MinIO's `mc` any more. The CI store behind

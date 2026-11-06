@@ -1,0 +1,86 @@
+From 316dbe761f8412c30abcd49c087a176e55e61b3c Mon Sep 17 00:00:00 2001
+From: slayerjain <shubhamkjain@outlook.com>
+Date: Fri, 6 Nov 2026 09:01:33 +0530
+Subject: [PATCH 2/2] test(agent): rows for a dropped Wait poll and the retry
+ window's edges
+
+Signed-off-by: slayerjain <shubhamkjain@outlook.com>
+---
+ agent/rpc/client_grpc_test.go | 64 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+
+diff --git a/agent/rpc/client_grpc_test.go b/agent/rpc/client_grpc_test.go
+index d1d03241..a7208867 100644
+--- a/agent/rpc/client_grpc_test.go
++++ b/agent/rpc/client_grpc_test.go
+@@ -333,3 +333,67 @@ func TestRetryRPCGivesUpAfterWindow(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// A Wait() long poll stays open for the whole workflow. When its transport
++// drops once (here the GOAWAY a server sends after too many keepalive pings)
++// after the poll has been open longer than the retry timeout, the agent must
++// reconnect and poll again. Before the fix the first failure was final and
++// the runner canceled the workflow.
++func TestRetryRPCWaitSurvivesTransportDropAfterLongPoll(t *testing.T) {
++	t.Parallel()
++
++	ctx := context.Background()
++	c := &client{connectionRetryTimeout: 300 * time.Millisecond}
++	var calls int
++
++	canceled, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++		calls++
++		if calls == 1 {
++			time.Sleep(2 * c.connectionRetryTimeout) // the poll outlives the window
++			drop := status.Error(codes.Unavailable, `closing transport due to: connection error: desc = "error reading from server: EOF", received prior goaway: code: ENHANCE_YOUR_CALM, debug data: "too_many_pings"`)
++			return false, classifyRPCErr(ctx, drop)
++		}
++		return false, nil
++	})
++
++	require.NoError(t, err)
++	assert.False(t, canceled)
++	assert.Equal(t, 2, calls)
++}
++
++// With no window (WOODPECKER_RETRY_TIMEOUT=0) the agent retries forever. Its
++// interval must still grow while the server stays away, not start again at
++// the initial 10 ms after every failed attempt.
++func TestFailureWindowBackOffZeroWindowKeepsGrowing(t *testing.T) {
++	t.Parallel()
++
++	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
++	b := newFailureWindowBackOff(0)
++	b.now = clock.now
++
++	var next time.Duration
++	for range 10 {
++		started := clock.now()
++		clock.advance(time.Millisecond) // the attempt fails after 1 ms
++		b.attemptFailed(started)
++		next = b.NextBackOff()
++		require.NotEqual(t, backoff.Stop, next)
++		clock.advance(next)
++	}
++
++	// 10 ms * 1.5^9 is about 384 ms; the randomization keeps it above half that.
++	assert.Greater(t, next, 100*time.Millisecond)
++}
++
++// The agent gives up before a wait that would end past the window, not one
++// interval (up to 10 s) after it.
++func TestFailureWindowBackOffStopsBeforeAWaitPastTheWindow(t *testing.T) {
++	t.Parallel()
++
++	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
++	b := &failureWindowBackOff{BackOff: backoff.NewConstantBackOff(60 * time.Millisecond), window: 100 * time.Millisecond, now: clock.now}
++
++	assert.Equal(t, 60*time.Millisecond, b.NextBackOff()) // 0 + 60 ms fits
++	clock.advance(60 * time.Millisecond)
++	assert.Equal(t, backoff.Stop, b.NextBackOff()) // 60 + 60 ms would end past 100 ms
++}
+-- 
+2.55.0
+

@@ -292,6 +292,9 @@ jobs:
             tag-prefix: 'ebpf-objects-'
             arch: amd64
             go: true
+          - context: ./keploy-ci-woodpecker-agent
+            tag-prefix: 'woodpecker-agent-'
+            arch: amd64
 
     steps:
       - name: Checkout repository
