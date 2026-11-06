@@ -9,8 +9,9 @@
 # cancels every workflow it is running, with every step marked killed.
 # 0001 is woodpecker-ci/woodpecker#7111 (for issue #7110), still open
 # upstream, applied to v3.20.1; 0002 adds the tests for the failure as it
-# happened here. When an upstream release carries the fix, go back to
-# upstream's image and delete this one.
+# happened here; 0003 starts the window over once the agent has reconnected,
+# so a drop soon after a reconnection is retried too. When an upstream release
+# carries these fixes, go back to upstream's image and delete this one.
 #
 # Follows upstream's docker/Dockerfile.agent.multiarch: the agent is built on
 # the build platform for the target, and the final image is scratch.

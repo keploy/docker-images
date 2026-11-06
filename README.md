@@ -109,12 +109,20 @@ default) from the moment an RPC began, not from its first failure. `Wait()`
 stays open for the whole workflow, so when the connection to the server drops
 once after that, the agent does not retry: it cancels every workflow it is
 running, and every step shows as killed. Patch 0001 is upstream's open fix,
-woodpecker-ci/woodpecker#7111 (issue #7110), applied to v3.20.1. Patch 0002
-adds tests for the failure as it happened on our agents: a `Wait()` that
-outlived the window and then got the server's `too_many_pings` GOAWAY, and an
-agent with no window (`WOODPECKER_RETRY_TIMEOUT=0`) whose retry interval must
-keep growing. The build runs the patched package's tests and fails if one
-fails.
+woodpecker-ci/woodpecker#7111 (issue #7110), applied to v3.20.1: the window
+counts from the first failure. Patch 0002 adds tests for the failure as it
+happened on our agents: a `Wait()` that outlived the window and then got the
+server's `too_many_pings` GOAWAY, at production scale too (a 2 minute window
+and a poll open for 30 minutes), and the window's edges. Patch 0003 starts the
+window over once the agent has reconnected, so a drop soon after a
+reconnection (a server restart followed by another drop, or a storm of
+GOAWAYs) is retried instead of being counted against the outage before it.
+The build runs the patched package's tests and fails if one fails.
+
+An outage longer than the window still ends with the agent giving up, and
+the runner then cancels every workflow on the agent, so choose
+`WOODPECKER_RETRY_TIMEOUT` longer than the outages to ride out, or 0 to
+retry forever.
 
 **Contents:** the `woodpecker-agent` binary (reporting version
 `<tag>-keploy.<n>`), CA certificates, timezone data, and upstream's
@@ -127,8 +135,8 @@ natively and do not use this image.
 image: ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>
 ```
 
-When an upstream release carries the fix, move the agents back to upstream's
-image at that release and delete this directory.
+When an upstream release carries these fixes, move the agents back to
+upstream's image at that release and delete this directory.
 
 Tag: `ghcr.io/keploy/keploy-ci:woodpecker-agent-<version>`.
 

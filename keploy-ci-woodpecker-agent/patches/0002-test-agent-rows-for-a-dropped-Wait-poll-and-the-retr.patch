@@ -1,22 +1,39 @@
-From 316dbe761f8412c30abcd49c087a176e55e61b3c Mon Sep 17 00:00:00 2001
+From 14ba8d55b7a955511f3839c02b5ef238787606c5 Mon Sep 17 00:00:00 2001
 From: slayerjain <shubhamkjain@outlook.com>
 Date: Fri, 6 Nov 2026 09:01:33 +0530
-Subject: [PATCH 2/2] test(agent): rows for a dropped Wait poll and the retry
+Subject: [PATCH 2/3] test(agent): rows for a dropped Wait poll and the retry
  window's edges
+
+- a Wait() that outlived the window and then got the too_many_pings
+  GOAWAY is retried, at test scale and, on the fake clock, at production
+  scale (2 minute window, a poll open for 30 minutes, past the backoff
+  library's own 15 minute default);
+- a real outage still ends within the window;
+- an attempt that stayed up for 1.5 windows starts a new streak;
+- that attempt also resets the interval to 10 ms;
+- with a zero window the interval keeps growing;
+- the agent gives up before a wait that would end past the window.
 
 Signed-off-by: slayerjain <shubhamkjain@outlook.com>
 ---
- agent/rpc/client_grpc_test.go | 64 +++++++++++++++++++++++++++++++++++
- 1 file changed, 64 insertions(+)
+ agent/rpc/client_grpc_test.go | 180 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 180 insertions(+)
 
 diff --git a/agent/rpc/client_grpc_test.go b/agent/rpc/client_grpc_test.go
-index d1d03241..a7208867 100644
+index d1d03241..a7821e61 100644
 --- a/agent/rpc/client_grpc_test.go
 +++ b/agent/rpc/client_grpc_test.go
-@@ -333,3 +333,67 @@ func TestRetryRPCGivesUpAfterWindow(t *testing.T) {
+@@ -333,3 +333,183 @@ func TestRetryRPCGivesUpAfterWindow(t *testing.T) {
  		})
  	}
  }
++
++// errGoawayDrop is the error a Wait() poll got when the server sent the GOAWAY
++// for too many keepalive pings, as the agents logged it.
++var errGoawayDrop = status.Error(codes.Unavailable, `closing transport due to: connection error: desc = "error reading from server: EOF", received prior goaway: code: ENHANCE_YOUR_CALM, debug data: "too_many_pings"`)
++
++// errStillRetrying ends a row's retry loop that should have given up long ago.
++var errStillRetrying = errors.New("still retrying 10 minutes into the outage")
 +
 +// A Wait() long poll stays open for the whole workflow. When its transport
 +// drops once (here the GOAWAY a server sends after too many keepalive pings)
@@ -26,7 +43,7 @@ index d1d03241..a7208867 100644
 +func TestRetryRPCWaitSurvivesTransportDropAfterLongPoll(t *testing.T) {
 +	t.Parallel()
 +
-+	ctx := context.Background()
++	ctx := t.Context()
 +	c := &client{connectionRetryTimeout: 300 * time.Millisecond}
 +	var calls int
 +
@@ -34,8 +51,7 @@ index d1d03241..a7208867 100644
 +		calls++
 +		if calls == 1 {
 +			time.Sleep(2 * c.connectionRetryTimeout) // the poll outlives the window
-+			drop := status.Error(codes.Unavailable, `closing transport due to: connection error: desc = "error reading from server: EOF", received prior goaway: code: ENHANCE_YOUR_CALM, debug data: "too_many_pings"`)
-+			return false, classifyRPCErr(ctx, drop)
++			return false, classifyRPCErr(ctx, errGoawayDrop)
 +		}
 +		return false, nil
 +	})
@@ -80,6 +96,116 @@ index d1d03241..a7208867 100644
 +	assert.Equal(t, 60*time.Millisecond, b.NextBackOff()) // 0 + 60 ms fits
 +	clock.advance(60 * time.Millisecond)
 +	assert.Equal(t, backoff.Stop, b.NextBackOff()) // 60 + 60 ms would end past 100 ms
++}
++
++// The same at production scale, on the fake clock: the default 2 minute window
++// and a Wait() that has been open for 30 minutes, longer than the backoff
++// library's own 15 minute default limit too. One drop is retried.
++func TestRetryRPCWaitOpen30MinutesSurvivesOneDrop(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := t.Context()
++		c := &client{connectionRetryTimeout: 2 * time.Minute}
++		var calls int
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			if calls == 1 {
++				time.Sleep(30 * time.Minute)
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			}
++			return false, nil
++		})
++
++		require.NoError(t, err)
++		assert.Equal(t, 2, calls)
++	})
++}
++
++// The window still ends a real outage: after a 30 minute Wait() the server
++// goes away for good. The agent gives up after failing for at least the window
++// minus one interval (at most 15 s), and never after the window.
++func TestRetryRPCGivesUpWithinTheWindowOfARealOutage(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := t.Context()
++		c := &client{connectionRetryTimeout: 2 * time.Minute}
++		var down time.Time
++		var calls int
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			switch {
++			case calls == 1:
++				time.Sleep(30 * time.Minute)
++				down = time.Now()
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			case time.Since(down) > 10*time.Minute:
++				return false, backoff.Permanent(errStillRetrying)
++			}
++			return false, errNotConnected
++		})
++
++		require.ErrorIs(t, err, ErrConnectionLost)
++		failing := time.Since(down)
++		assert.GreaterOrEqual(t, failing, 100*time.Second)
++		assert.LessOrEqual(t, failing, 2*time.Minute)
++	})
++}
++
++// An attempt that stayed up for longer than the window starts a new streak.
++// Here a quick failure is followed by a Wait() that ran for 3 minutes, less
++// than twice the 2 minute window, before it failed too. That failure is
++// retried.
++func TestRetryRPCAttemptLongerThanTheWindowStartsNewStreak(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := t.Context()
++		c := &client{connectionRetryTimeout: 2 * time.Minute}
++		var calls int
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			switch calls {
++			case 1:
++				return false, classifyRPCErr(ctx, status.Error(codes.Unavailable, "connection refused"))
++			case 2:
++				time.Sleep(3 * time.Minute)
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			default:
++				return false, nil
++			}
++		})
++
++		require.NoError(t, err)
++		assert.Equal(t, 3, calls)
++	})
++}
++
++// newSteadyExponential is the agent's exponential policy without the
++// randomization, so a row can check its intervals exactly.
++func newSteadyExponential() *backoff.ExponentialBackOff {
++	exp := backoff.NewExponentialBackOff()
++	exp.InitialInterval = 10 * time.Millisecond
++	exp.MaxInterval = 10 * time.Second
++	exp.RandomizationFactor = 0
++	return exp
++}
++
++// After an attempt that outlived the window, the interval starts over at
++// 10 ms too, so the first retry after a long Wait() is not held back by an
++// earlier streak's interval.
++func TestFailureWindowBackOffLongAttemptResetsTheInterval(t *testing.T) {
++	t.Parallel()
++
++	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
++	b := &failureWindowBackOff{BackOff: newSteadyExponential(), window: time.Minute, now: clock.now}
++	for range 5 {
++		b.attemptFailed(clock.now())
++		clock.advance(b.NextBackOff())
++	}
++
++	started := clock.now()
++	clock.advance(2 * time.Minute)
++	b.attemptFailed(started)
++	assert.Equal(t, 10*time.Millisecond, b.NextBackOff())
 +}
 -- 
 2.55.0

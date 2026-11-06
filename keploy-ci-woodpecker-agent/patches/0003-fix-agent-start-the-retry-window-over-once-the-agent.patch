@@ -1,0 +1,546 @@
+From 9dc61d4899c3ac0aa909658a42c15e6f8b9d7857 Mon Sep 17 00:00:00 2001
+From: slayerjain <shubhamkjain@outlook.com>
+Date: Fri, 6 Nov 2026 10:20:48 +0530
+Subject: [PATCH 3/3] fix(agent): start the retry window over once the agent
+ has reconnected
+
+The window counts from the first failure of a streak, and a streak ended
+only after an attempt that stayed up for longer than the whole window.
+So a drop soon after the agent had reconnected was counted against an
+outage that was already over: after a server restart (down for 60 s,
+then a Wait() that ran for 90 s on the new connection and dropped), or
+in a storm of GOAWAYs after connections that worked for less than the
+window, the agent gave up and the runner canceled its workflows.
+
+The client now counts the times its connection became Ready, from a
+goroutine that watches the state and from every failed attempt. gRPC
+reports Ready only after a new transport has completed its handshake, so
+a count that moved between two failures proves the agent reconnected in
+between. That failure then starts a new window. The interval keeps
+growing, so a server that accepts connections and drops them at once is
+not called every 10 ms. Without a reconnection the window keeps counting
+from the first failure, as before.
+
+Signed-off-by: slayerjain <shubhamkjain@outlook.com>
+---
+ agent/rpc/client_grpc.go      |  92 +++++++++-
+ agent/rpc/client_grpc_test.go | 333 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 420 insertions(+), 5 deletions(-)
+
+diff --git a/agent/rpc/client_grpc.go b/agent/rpc/client_grpc.go
+index d5247a64..0079ff51 100644
+--- a/agent/rpc/client_grpc.go
++++ b/agent/rpc/client_grpc.go
+@@ -19,6 +19,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/cenkalti/backoff/v7"
+@@ -58,9 +59,13 @@ type client struct {
+ 	logs   chan *proto.LogEntry
+ 	// connectionRetryTimeout bounds how long an RPC keeps failing before it
+ 	// gives up. Zero means infinite. The clock starts at the first failure, not
+-	// when the RPC was issued (see failureWindowBackOff). Whether a give-up
+-	// ends the agent is decided by the callers (cmd/agent/core/agent.go).
++	// when the RPC was issued, and starts over when the agent reconnects (see
++	// failureWindowBackOff). Whether a give-up ends the agent is decided by the
++	// callers (cmd/agent/core/agent.go).
+ 	connectionRetryTimeout time.Duration
++	// ready counts the connection's reconnections for the retry policy. Nil in
++	// a client made without NewGrpcClient.
++	ready *readyTracker
+ 	// logEntryBufferSize sets the buffer size before the log reader is blocking.
+ 	// If you have enough memory and log bursts, set it higher.
+ 	logEntryBufferSize int
+@@ -78,8 +83,10 @@ func NewGrpcClient(ctx context.Context, conn *grpc.ClientConn, opts ...ClientOpt
+ 	}
+ 
+ 	client.logs = make(chan *proto.LogEntry, client.logEntryBufferSize) // max memory use: buffer count * 1 MiB
++	client.ready = &readyTracker{conn: conn}
+ 
+ 	go client.processLogs(ctx)
++	go client.ready.watch(ctx)
+ 	return client
+ }
+ 
+@@ -112,9 +119,68 @@ func (c *client) IsConnected() bool {
+ 	return state == connectivity.Ready || state == connectivity.Idle
+ }
+ 
++// connState is the part of *grpc.ClientConn that readyTracker reads.
++type connState interface {
++	GetState() connectivity.State
++	WaitForStateChange(ctx context.Context, sourceState connectivity.State) bool
++}
++
++// readyTracker counts the times the connection has become Ready. If the count
++// moved between two failed attempts, the agent reconnected to the server in
++// between: gRPC reports Ready only once a new transport has completed its
++// handshake with the server.
++type readyTracker struct {
++	conn  connState
++	mu    sync.Mutex
++	last  connectivity.State
++	count uint64
++}
++
++// observe reads the connection's state and counts it if it is a Ready that the
++// previous read did not see. The state is read under the lock, so the reads of
++// the watcher and of failing RPCs are counted in the order they were made: a
++// Ready that a failure saw is not counted again when the watcher sees it late.
++func (r *readyTracker) observe() (uint64, connectivity.State) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++
++	state := r.conn.GetState()
++	if state == connectivity.Ready && r.last != connectivity.Ready {
++		r.count++
++	}
++	r.last = state
++	return r.count, state
++}
++
++// watch reads the state after every change until ctx ends or the connection is
++// closed, so it counts a reconnection while a long poll is open, when no RPC
++// fails to read it.
++func (r *readyTracker) watch(ctx context.Context) {
++	for {
++		_, state := r.observe()
++		if state == connectivity.Shutdown {
++			return
++		}
++		if !r.conn.WaitForStateChange(ctx, state) {
++			return
++		}
++	}
++}
++
++// readyCount reads the connection's state and returns its Ready count, or 0
++// for a client with no connection to watch.
++func (c *client) readyCount() uint64 {
++	if c.ready == nil {
++		return 0
++	}
++	count, _ := c.ready.observe()
++	return count
++}
++
+ // failureWindowBackOff wraps the exponential policy and stops it once the
+ // operation has been failing for longer than window, counted from the first
+-// failure of the current streak.
++// failure of the current streak. A streak ends when the agent reconnects to
++// the server (see readyCountAtFailure).
+ //
+ // The library's backoff.WithMaxElapsedTime cannot express this: it counts from
+ // the moment backoff.Retry was called, but Next and Wait are long polls that
+@@ -127,6 +193,8 @@ type failureWindowBackOff struct {
+ 	window       time.Duration
+ 	now          func() time.Time
+ 	firstFailure time.Time
++	// readyCount is the connection's Ready count at the last failed attempt.
++	readyCount uint64
+ }
+ 
+ // newFailureWindowBackOff keeps the original tuning of the exponential policy
+@@ -153,6 +221,18 @@ func (b *failureWindowBackOff) attemptFailed(started time.Time) {
+ 	}
+ }
+ 
++// readyCountAtFailure takes the connection's Ready count at a failed attempt.
++// If it moved since the previous failure, the agent reconnected in between, so
++// this failure begins a new outage and the window starts over from it. The
++// interval keeps growing: a server that accepts connections and drops them at
++// once is called at the policy's growing interval, not every 10 ms.
++func (b *failureWindowBackOff) readyCountAtFailure(count uint64) {
++	if count != b.readyCount {
++		b.firstFailure = time.Time{}
++	}
++	b.readyCount = count
++}
++
+ // NextBackOff returns backoff.Stop once the window has elapsed since the first
+ // failure of the current streak. A zero window never stops.
+ func (b *failureWindowBackOff) NextBackOff() time.Duration {
+@@ -203,8 +283,9 @@ func (c *client) retryOpts(op string, b backoff.BackOff) []backoff.RetryOption {
+ 
+ // retryRPC is the workhorse used by every RPC method in this file. It runs op
+ // under backoff.Retry with the standard options, tells the retry policy how
+-// long each failed attempt lived, and translates the few special outcomes the
+-// callers care about:
++// long each failed attempt lived and whether the agent reconnected since the
++// previous failure, and translates the few special outcomes the callers care
++// about:
+ //
+ //   - op succeeds                       -> (result, nil)
+ //   - ctx canceled                      -> (zero, nil)            same contract as before
+@@ -223,6 +304,7 @@ func retryRPC[T any](ctx context.Context, c *client, opName string, op backoff.O
+ 		started := b.now()
+ 		res, err := op()
+ 		if err != nil {
++			b.readyCountAtFailure(c.readyCount())
+ 			b.attemptFailed(started)
+ 		}
+ 		return res, err
+diff --git a/agent/rpc/client_grpc_test.go b/agent/rpc/client_grpc_test.go
+index a7821e61..afe63aeb 100644
+--- a/agent/rpc/client_grpc_test.go
++++ b/agent/rpc/client_grpc_test.go
+@@ -17,7 +17,10 @@ package rpc
+ import (
+ 	"context"
+ 	"errors"
++	"net"
++	"runtime"
+ 	"sync"
++	"sync/atomic"
+ 	"testing"
+ 	"testing/synctest"
+ 	"time"
+@@ -27,7 +30,10 @@ import (
+ 	"github.com/stretchr/testify/require"
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/connectivity"
++	"google.golang.org/grpc/credentials/insecure"
+ 	"google.golang.org/grpc/status"
++	"google.golang.org/grpc/test/bufconn"
+ 
+ 	"go.woodpecker-ci.org/woodpecker/v3/rpc"
+ 	"go.woodpecker-ci.org/woodpecker/v3/rpc/proto"
+@@ -513,3 +519,330 @@ func TestFailureWindowBackOffLongAttemptResetsTheInterval(t *testing.T) {
+ 	b.attemptFailed(started)
+ 	assert.Equal(t, 10*time.Millisecond, b.NextBackOff())
+ }
++
++// fakeConn is a connection whose state the test sets. Its channels belong to
++// the synctest bubble that made it, so a watcher waiting on it is durably
++// blocked.
++type fakeConn struct {
++	mu      sync.Mutex
++	state   connectivity.State
++	changed chan struct{}
++	// returnedFalse is set once WaitForStateChange has returned false, and
++	// waitedAfterFalse if it was called again after that.
++	returnedFalse    atomic.Bool
++	waitedAfterFalse atomic.Bool
++}
++
++// newFakeConn returns a connection that is Ready.
++func newFakeConn() *fakeConn {
++	return &fakeConn{state: connectivity.Ready, changed: make(chan struct{})}
++}
++
++func (f *fakeConn) set(state connectivity.State) {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if state == f.state {
++		return
++	}
++	f.state = state
++	close(f.changed)
++	f.changed = make(chan struct{})
++}
++
++func (f *fakeConn) GetState() connectivity.State {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.state
++}
++
++func (f *fakeConn) WaitForStateChange(ctx context.Context, source connectivity.State) bool {
++	if f.returnedFalse.Load() {
++		// The caller ignored the false it got: record that, and end the
++		// caller's goroutine instead of letting it spin.
++		f.waitedAfterFalse.Store(true)
++		runtime.Goexit()
++	}
++
++	f.mu.Lock()
++	state, changed := f.state, f.changed
++	f.mu.Unlock()
++	if state != source {
++		return true
++	}
++	select {
++	case <-ctx.Done():
++		f.returnedFalse.Store(true)
++		return false
++	case <-changed:
++		return true
++	}
++}
++
++// newWatchedClient returns a client whose Ready count follows conn, watched
++// the way NewGrpcClient watches the real connection.
++func newWatchedClient(ctx context.Context, window time.Duration, conn *fakeConn) *client {
++	c := &client{connectionRetryTimeout: window, ready: &readyTracker{conn: conn}}
++	go c.ready.watch(ctx)
++	return c
++}
++
++// The server restarts: it is down for 60 s, comes back, and the re-sent
++// Wait() runs for 90 s on the new connection before that drops too. The second
++// drop begins a new outage, so it is retried, though the first failure is
++// only 150 s, less than two windows, behind it.
++func TestRetryRPCDropAfterAReconnectStartsANewWindow(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx, cancel := context.WithCancelCause(t.Context())
++		defer cancel(nil)
++		conn := newFakeConn()
++		c := newWatchedClient(ctx, 2*time.Minute, conn)
++		var down time.Time
++		phase := 0
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			switch phase {
++			case 0: // the long poll; then the server goes away
++				time.Sleep(30 * time.Minute)
++				conn.set(connectivity.Idle)
++				down = time.Now()
++				phase = 1
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			case 1:
++				if time.Since(down) < time.Minute {
++					conn.set(connectivity.TransientFailure)
++					return false, errNotConnected
++				}
++				// The server is back: the agent reconnects, and the Wait() it
++				// sends again runs for 90 s before this connection drops too.
++				conn.set(connectivity.Ready)
++				time.Sleep(90 * time.Second)
++				conn.set(connectivity.Idle)
++				phase = 2
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			default:
++				phase = 3
++				return false, nil
++			}
++		})
++
++		require.NoError(t, err)
++		assert.Equal(t, 3, phase)
++	})
++}
++
++// The storm a server sends when it GOAWAYs agents for too many pings: drops
++// after connections that worked for 30 s, 60 s and 110 s, each shorter than the
++// 2 minute window and each reconnecting at once. Every drop is retried.
++func TestRetryRPCDropsAfterReconnectsAreAllRetried(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx, cancel := context.WithCancelCause(t.Context())
++		defer cancel(nil)
++		conn := newFakeConn()
++		c := newWatchedClient(ctx, 2*time.Minute, conn)
++		lives := []time.Duration{30 * time.Minute, 30 * time.Second, time.Minute, 110 * time.Second}
++		var calls int
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			if calls > len(lives) {
++				return false, nil
++			}
++			conn.set(connectivity.Ready)
++			time.Sleep(lives[calls-1])
++			conn.set(connectivity.Idle)
++			return false, classifyRPCErr(ctx, errGoawayDrop)
++		})
++
++		require.NoError(t, err)
++		assert.Equal(t, len(lives)+1, calls)
++	})
++}
++
++// With no reconnection the window keeps counting from the first failure, even
++// when an attempt in between took 50 s to fail (a connection attempt that
++// hung). The agent gives up within the window.
++func TestRetryRPCSlowFailureWithoutAReconnectKeepsTheWindow(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx, cancel := context.WithCancelCause(t.Context())
++		defer cancel(nil)
++		conn := newFakeConn()
++		c := newWatchedClient(ctx, 2*time.Minute, conn)
++		var down time.Time
++		var calls int
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			switch {
++			case calls == 1:
++				time.Sleep(30 * time.Minute)
++				conn.set(connectivity.Idle)
++				down = time.Now()
++				return false, classifyRPCErr(ctx, errGoawayDrop)
++			case time.Since(down) > 10*time.Minute:
++				return false, backoff.Permanent(errStillRetrying)
++			case calls == 5:
++				conn.set(connectivity.Connecting)
++				time.Sleep(50 * time.Second)
++			}
++			conn.set(connectivity.TransientFailure)
++			return false, errNotConnected
++		})
++
++		require.ErrorIs(t, err, ErrConnectionLost)
++		assert.LessOrEqual(t, time.Since(down), 2*time.Minute)
++	})
++}
++
++// A failure counts the Ready it reads itself. A watcher that gets to that same
++// connection only after the failure does not make it look like a
++// reconnection: the server answers every attempt with an error on a connection
++// that stays Ready, the watcher reads it 100 s into the streak, and the agent
++// still gives up within the window.
++func TestRetryRPCLateWatcherDoesNotStartANewWindow(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := t.Context()
++		conn := newFakeConn()
++		c := &client{connectionRetryTimeout: 2 * time.Minute, ready: &readyTracker{conn: conn}}
++		var first time.Time
++		var calls int
++		watched := false
++
++		_, err := retryRPC(ctx, c, "wait", func() (bool, error) {
++			calls++
++			switch {
++			case calls == 1:
++				first = time.Now()
++			case time.Since(first) > 10*time.Minute:
++				return false, backoff.Permanent(errStillRetrying)
++			case !watched && time.Since(first) > 100*time.Second:
++				watched = true
++				c.ready.observe() // the watcher, late
++			}
++			return false, classifyRPCErr(ctx, status.Error(codes.Unavailable, "server is shutting down"))
++		})
++
++		require.ErrorIs(t, err, backoff.ErrMaxElapsedTime)
++		require.True(t, watched, "gave up before the watcher read the connection")
++		assert.LessOrEqual(t, time.Since(first), 2*time.Minute)
++	})
++}
++
++// A reconnection starts the window over but not the interval, so a server that
++// accepts connections and drops them at once is called at a growing interval,
++// not every 10 ms.
++func TestFailureWindowBackOffReconnectKeepsTheInterval(t *testing.T) {
++	t.Parallel()
++
++	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
++	b := &failureWindowBackOff{BackOff: newSteadyExponential(), window: time.Minute, now: clock.now}
++	var next time.Duration
++	for count := range uint64(6) {
++		b.readyCountAtFailure(count + 1) // reconnected before every failure
++		b.attemptFailed(clock.now())
++		next = b.NextBackOff()
++		clock.advance(next)
++	}
++
++	// 10 ms * 1.5^5
++	assert.Equal(t, 75937500*time.Nanosecond, next)
++}
++
++// The watcher ends when the connection is closed, without waiting for its
++// context.
++func TestReadyTrackerWatchEndsWhenTheConnectionCloses(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx, cancel := context.WithCancelCause(t.Context())
++		defer cancel(nil)
++		conn := newFakeConn()
++		r := &readyTracker{conn: conn}
++		done := make(chan struct{})
++		go func() {
++			r.watch(ctx)
++			close(done)
++		}()
++
++		conn.set(connectivity.Shutdown)
++		synctest.Wait()
++
++		select {
++		case <-done:
++		default:
++			t.Fatal("watch still runs after the connection closed")
++		}
++	})
++}
++
++// The watcher ends when its context ends.
++func TestReadyTrackerWatchEndsWithItsContext(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx, cancel := context.WithCancelCause(t.Context())
++		conn := newFakeConn()
++		r := &readyTracker{conn: conn}
++		done := make(chan struct{})
++		go func() {
++			r.watch(ctx)
++			close(done)
++		}()
++
++		cancel(nil)
++		synctest.Wait()
++
++		assert.False(t, conn.waitedAfterFalse.Load(), "watch waited again after its context ended")
++		select {
++		case <-done:
++		default:
++			t.Fatal("watch still runs after its context ended")
++		}
++	})
++}
++
++// readyCountOf reads r's count without reading the connection's state.
++func readyCountOf(r *readyTracker) uint64 {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	return r.count
++}
++
++// NewGrpcClient counts the real connection's reconnections: once when it
++// first connects, and once more when it connects again after the server went
++// away and came back.
++func TestNewGrpcClientCountsReconnections(t *testing.T) {
++	ctx, cancel := context.WithCancelCause(t.Context())
++	defer cancel(nil)
++
++	var lis atomic.Pointer[bufconn.Listener]
++	serve := func() *grpc.Server {
++		l := bufconn.Listen(1 << 16)
++		lis.Store(l)
++		srv := grpc.NewServer()
++		go func() { _ = srv.Serve(l) }()
++		return srv
++	}
++	srv := serve()
++	conn, err := grpc.NewClient("passthrough:///bufnet",
++		grpc.WithTransportCredentials(insecure.NewCredentials()),
++		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
++			return lis.Load().DialContext(ctx)
++		}),
++	)
++	require.NoError(t, err)
++	defer conn.Close()
++	c, ok := NewGrpcClient(ctx, conn).(*client)
++	require.True(t, ok)
++
++	// Connect only starts a connection attempt when the connection is idle,
++	// as it is after the server went away, so it is called until the count
++	// moves.
++	reaches := func(want uint64) func() bool {
++		return func() bool {
++			conn.Connect()
++			return readyCountOf(c.ready) == want
++		}
++	}
++	require.Eventually(t, reaches(1), 10*time.Second, time.Millisecond)
++
++	srv.Stop()
++	srv = serve()
++	defer srv.Stop()
++	require.Eventually(t, reaches(2), 10*time.Second, time.Millisecond)
++}
+-- 
+2.55.0
+
