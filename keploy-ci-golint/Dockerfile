@@ -61,25 +61,34 @@ RUN set -eux; \
 # supported version 4)"); golint-1.2.46 shipped v2.13.2 on go1.27.2.
 ARG GOLANGCI_LINT_VERSION=v2.15.0
 
-# golangci-lint is installed by hand rather than by piping upstream's
-# install.sh, which cannot install any version we are able to use here.
+# golangci-lint is installed by hand: the release tarball, verified against its
+# line in the release's checksums file, matched on the EXACT filename.
 #
-# From v2.13.0 the release publishes an SBOM alongside each archive, named
-# "<tarball>.sbom.json", so the checksums file carries two lines whose names
-# both CONTAIN the tarball name. install.sh looks the checksum up with an
-# unanchored grep:
+# The install.sh on upstream's master branch, still served at
+# raw.githubusercontent.com/golangci/golangci-lint/master/install.sh, cannot
+# install v2.12.0 or later. From v2.12.0 the release publishes an SBOM
+# alongside each binary archive, named "<tarball>.sbom.json", so the checksums
+# file carries two lines whose names both CONTAIN the tarball name. That copy
+# looks the checksum up with an unanchored grep:
 #
-#     want=$(grep "${BASENAME}" "${checksums}" | tr '\t' ' ' | cut -d ' ' -f 1)
+#     want=$(grep "${BASENAME}" "${checksums}" 2>/dev/null | tr '\t' ' ' | cut -d ' ' -f 1)
 #
 # which matches both lines, leaves $want holding two hashes, and fails the
 # verify every time with a correctly downloaded archive:
 #
 #     err hash_sha256_verify checksum for '...-linux-amd64.tar.gz' did not verify
 #
-# v2.13.0 is also the first release built with Go 1.27, and golangci-lint
-# refuses to run when its build Go is older than the module's target, so every
-# version new enough for a `go 1.27.0` module hits that bug. Matching the
-# checksum line on the EXACT filename avoids it and keeps verification intact.
+# v2.13.0 is the first release built with Go 1.27, and golangci-lint refuses
+# to run when the language version of its build Go is older than the module's,
+# so that copy cannot install any version new enough for a Go 1.27 module.
+#
+# master has not moved since March 2025; upstream works on main, where
+# golangci/golangci-lint#6539 (2026-05-01) anchored that grep at the end of the
+# line (`grep "${BASENAME}$"`). Main's install.sh, which
+# https://golangci-lint.run/install.sh serves and which is the same file as the
+# v2.15.0 tag's copy, installs v2.15.0. The install below makes the same check
+# as main's install.sh (the tarball's sha256 against its line in the checksums
+# file) without fetching a script at build time.
 #
 # Ends by linting a module that imports the stdlib, with this image's Go, so a
 # golangci-lint that cannot read this Go's export data fails here, not in a
