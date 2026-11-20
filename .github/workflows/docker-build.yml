@@ -214,6 +214,12 @@ jobs:
           - context: ./keploy-ci-slim
             tag-prefix: 'slim-'
             arch: arm64
+          - context: ./keploy-ci-scripts
+            tag-prefix: 'scripts-'
+            arch: amd64
+          - context: ./keploy-ci-scripts
+            tag-prefix: 'scripts-'
+            arch: arm64
           - context: ./keploy-ci-timefreeze
             tag-prefix: 'timefreeze-'
             arch: amd64

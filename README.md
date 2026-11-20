@@ -97,6 +97,35 @@ by digest, and it cannot be rebuilt after that window.
 
 Tag: `ghcr.io/keploy/keploy-ci:ebpf-objects-<version>`.
 
+### keploy-ci-scripts
+
+The image k8s-proxy's `ci-script-tests` step runs in: the shell unit tests of
+its CI scripts, under busybox ash, dash and bash, busybox's applets and GNU
+coreutils, and busybox awk, gawk and mawk.
+
+**Why:** the step used to `apk add` its packages from dl-cdn.alpinelinux.org as
+it ran, so an `IO ERROR` there turned a pipeline red with nothing wrong in it.
+Here it downloads nothing. alpine 3.20 (pinned by digest) with yq-go (mikefarah's
+yq), git, bash, jq, dash, openssl, GNU tar and zstd installed: what the step
+installed before its first test. The packages it adds part-way, because the
+tests before that point run under busybox's applets on purpose, are `.apk` files
+under `/opt/apk/<group>/`, installed from the image alone where the tests first
+need them, in this order:
+
+```sh
+apk add --no-network --no-cache /opt/apk/python3/*.apk
+apk add --no-network --no-cache /opt/apk/zip/*.apk
+apk add --no-network --no-cache /opt/apk/coreutils/*.apk   # GNU coreutils, util-linux-misc
+apk add --no-network --no-cache /opt/apk/awk/*.apk         # gawk (becomes awk), mawk
+```
+
+Each group holds what `apk add` would install at that point, on top of the
+image and the groups before it. The build installs each group the same way,
+offline and in that order, so a group that cannot install from its files fails
+the build, never the step.
+
+Tag: `ghcr.io/keploy/keploy-ci:scripts-<version>`.
+
 ### keploy-ci-woodpecker-agent
 
 The Woodpecker CI agent, built from upstream's source at a pinned tag and
@@ -185,7 +214,7 @@ The images form a three-tier chain, and `publish.yml` builds them in that order:
 
 | tier | images | built FROM |
 |---|---|---|
-| 1 | `keploy-ci`, `slim`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build`; `ebpf-objects` (its own job) | upstream (debian/alpine/golang/ubuntu) |
+| 1 | `keploy-ci`, `slim`, `scripts`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build`; `ebpf-objects` (its own job) | upstream (debian/alpine/golang/ubuntu) |
 | 2 | `node`, `java`, `python`, `kube` | `keploy-ci:<version>` |
 | 3 | `playwright`, `lighthouse` | `keploy-ci:node-<version>` |
 

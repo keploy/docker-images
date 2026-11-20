@@ -36,6 +36,9 @@ jobs:
           - context: ./keploy-ci-slim
             tag-prefix: 'slim-'
             platforms: linux/amd64,linux/arm64
+          - context: ./keploy-ci-scripts
+            tag-prefix: 'scripts-'
+            platforms: linux/amd64,linux/arm64
           - context: ./keploy-ci-timefreeze
             tag-prefix: 'timefreeze-'
             platforms: linux/amd64,linux/arm64
