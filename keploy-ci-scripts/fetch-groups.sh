@@ -3,10 +3,11 @@
 #
 # For each group, in order: the .apk files `apk add PKG...` would install or
 # upgrade at that point (on top of the image and of the groups before it),
-# saved to OUT/NAME/, then installed from those files alone, with no network,
-# exactly as a step installs them (apk add --no-network --no-cache
+# saved to OUT/NAME/, then installed from those files alone, exactly as a step
+# installs them (apk add --no-network --repositories-file /dev/null
 # /opt/apk/NAME/*.apk). So the build fails here when a group cannot install
-# offline, and never in the step.
+# from its files, or when installing it reads the network, and never in the
+# step.
 #
 # Run in a throwaway build stage: the installs are only there so that each
 # group resolves against the ones before it.
@@ -30,7 +31,20 @@ while [ $# -gt 0 ]; do
   mkdir -p "$out/$name"
   # shellcheck disable=SC2086
   apk fetch --no-cache -o "$out/$name" $names
-  apk add --no-network --no-cache "$out/$name"/*.apk
+  # The step's command. With no repository named, apk resolves the files
+  # against the installed packages alone and fetches no index: with only
+  # --no-network --no-cache, apk 2.14 still fetched the main and community
+  # APKINDEX. A "fetch http" line in its output fails the build.
+  log=$(apk add --no-network --repositories-file /dev/null "$out/$name"/*.apk 2>&1) || {
+    printf '%s\n' "$log" >&2
+    echo "fetch-groups: group $name does not install from its files alone" >&2
+    exit 1
+  }
+  printf '%s\n' "$log"
+  if printf '%s\n' "$log" | grep -F 'fetch http' >&2; then
+    echo "fetch-groups: installing group $name from its files read the network" >&2
+    exit 1
+  fi
   for p in $pkgs; do
     apk info -e "$p" >/dev/null || { echo "fetch-groups: $p is not installed after group $name" >&2; exit 1; }
   done

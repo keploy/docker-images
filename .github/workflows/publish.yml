@@ -36,9 +36,6 @@ jobs:
           - context: ./keploy-ci-slim
             tag-prefix: 'slim-'
             platforms: linux/amd64,linux/arm64
-          - context: ./keploy-ci-scripts
-            tag-prefix: 'scripts-'
-            platforms: linux/amd64,linux/arm64
           - context: ./keploy-ci-timefreeze
             tag-prefix: 'timefreeze-'
             platforms: linux/amd64,linux/arm64
@@ -103,7 +100,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── A tier-1 image no other image needs, in a job of its own ────────
+  # ── Tier-1 images no other image needs, in a job of their own ──────
   # keploy-ci-ebpf-objects is built FROM upstream like base-images, but it is
   # NOT a base-images leg: node-image and derived-images need base-images, and
   # a needs: on a fail-fast:false matrix fails if ANY leg fails, so a leg
@@ -130,6 +127,11 @@ jobs:
           # amd64-only: every Linux Woodpecker agent host is x86_64.
           - context: ./keploy-ci-woodpecker-agent
             tag-prefix: 'woodpecker-agent-'
+            platforms: linux/amd64
+          # The image of one Woodpecker step (k8s-proxy's ci-script-tests),
+          # and nothing builds FROM it. amd64-only for the same reason.
+          - context: ./keploy-ci-scripts
+            tag-prefix: 'scripts-'
             platforms: linux/amd64
 
     steps:

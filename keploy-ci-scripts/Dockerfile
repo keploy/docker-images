@@ -15,10 +15,13 @@
 # its tests first need them, in this order (each group resolves against the
 # ones before it):
 #
-#   apk add --no-network --no-cache /opt/apk/python3/*.apk
-#   apk add --no-network --no-cache /opt/apk/zip/*.apk
-#   apk add --no-network --no-cache /opt/apk/coreutils/*.apk   # GNU date, sleep, timeout, setsid...
-#   apk add --no-network --no-cache /opt/apk/awk/*.apk         # gawk becomes awk
+#   apk add --no-network --repositories-file /dev/null /opt/apk/python3/*.apk
+#   apk add --no-network --repositories-file /dev/null /opt/apk/zip/*.apk        # zip, Info-ZIP unzip
+#   apk add --no-network --repositories-file /dev/null /opt/apk/coreutils/*.apk  # GNU date, sleep, timeout, setsid...
+#   apk add --no-network --repositories-file /dev/null /opt/apk/awk/*.apk        # gawk becomes awk
+#
+# With no repository named, apk fetches no index: with only --no-network
+# --no-cache it still fetched the main and community APKINDEX.
 #
 # alpine 3.20: the busybox the step's awk rows name as the older one
 # (alpine/helm's is newer).
@@ -39,3 +42,18 @@ RUN sh /fetch-groups.sh /out \
 
 FROM base
 COPY --from=resolve /out /opt/apk
+# The tests before the first group run under busybox's applets on purpose, so a
+# package that pulls in a replacement for one of them, or one of the groups'
+# tools, up front fails the build instead of silently changing what those tests
+# run under.
+RUN set -eu; \
+    for t in date sleep timeout setsid awk unzip; do \
+      p=$(command -v "$t") || { echo "scripts image: no $t" >&2; exit 1; }; \
+      [ "$(readlink -f "$p")" = /bin/busybox ] || \
+        { echo "scripts image: $t is $(readlink -f "$p"), not busybox" >&2; exit 1; }; \
+    done; \
+    for t in python3 zip gawk mawk; do \
+      if command -v "$t" >/dev/null; then \
+        echo "scripts image: $t is installed before its group" >&2; exit 1; \
+      fi; \
+    done

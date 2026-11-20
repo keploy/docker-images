@@ -113,16 +113,30 @@ under `/opt/apk/<group>/`, installed from the image alone where the tests first
 need them, in this order:
 
 ```sh
-apk add --no-network --no-cache /opt/apk/python3/*.apk
-apk add --no-network --no-cache /opt/apk/zip/*.apk
-apk add --no-network --no-cache /opt/apk/coreutils/*.apk   # GNU coreutils, util-linux-misc
-apk add --no-network --no-cache /opt/apk/awk/*.apk         # gawk (becomes awk), mawk
+apk add --no-network --repositories-file /dev/null /opt/apk/python3/*.apk
+apk add --no-network --repositories-file /dev/null /opt/apk/zip/*.apk        # zip, Info-ZIP unzip
+apk add --no-network --repositories-file /dev/null /opt/apk/coreutils/*.apk  # GNU coreutils, util-linux-misc
+apk add --no-network --repositories-file /dev/null /opt/apk/awk/*.apk        # gawk (becomes awk), mawk
 ```
 
+`--repositories-file /dev/null` is what keeps it offline: with no repository
+named, apk resolves the files against the installed packages alone. With only
+`--no-network --no-cache`, apk 2.14 still fetched the main and community
+`APKINDEX` from dl-cdn.
+
 Each group holds what `apk add` would install at that point, on top of the
-image and the groups before it. The build installs each group the same way,
-offline and in that order, so a group that cannot install from its files fails
-the build, never the step.
+image and the groups before it. The build installs each group with the same
+command, in that order, and fails if a group cannot install from its files or
+if its install prints a `fetch http` line; the step runs that command on the
+same files.
+It also fails if the image would start with anything but busybox's `date`,
+`sleep`, `timeout`, `setsid`, `awk` and `unzip`, or with `python3`, `zip`,
+`gawk` or `mawk` already in it, so a package change cannot silently change what
+the tests before the first group run under.
+
+amd64 only: it is the image of one Woodpecker step, and every Linux Woodpecker
+agent host is x86_64. It is published by `standalone-images`, like
+`ebpf-objects`: nothing builds FROM it.
 
 Tag: `ghcr.io/keploy/keploy-ci:scripts-<version>`.
 
@@ -214,7 +228,7 @@ The images form a three-tier chain, and `publish.yml` builds them in that order:
 
 | tier | images | built FROM |
 |---|---|---|
-| 1 | `keploy-ci`, `slim`, `scripts`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build`; `ebpf-objects` (its own job) | upstream (debian/alpine/golang/ubuntu) |
+| 1 | `keploy-ci`, `slim`, `timefreeze`, `golint`, `awscli`, `azurecli`, `go-build`; `ebpf-objects`, `scripts`, `woodpecker-agent` (their own job, `standalone-images`) | upstream (debian/alpine/golang/ubuntu), or upstream's source |
 | 2 | `node`, `java`, `python`, `kube` | `keploy-ci:<version>` |
 | 3 | `playwright`, `lighthouse` | `keploy-ci:node-<version>` |
 

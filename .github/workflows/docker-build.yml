@@ -214,12 +214,6 @@ jobs:
           - context: ./keploy-ci-slim
             tag-prefix: 'slim-'
             arch: arm64
-          - context: ./keploy-ci-scripts
-            tag-prefix: 'scripts-'
-            arch: amd64
-          - context: ./keploy-ci-scripts
-            tag-prefix: 'scripts-'
-            arch: arm64
           - context: ./keploy-ci-timefreeze
             tag-prefix: 'timefreeze-'
             arch: amd64
@@ -282,7 +276,7 @@ jobs:
           echo "keploy-ci declares $want; ${{ matrix.tag-prefix || 'base' }} (${{ matrix.arch }}) runs $got"
           [ "$got" = "$want" ] || { echo "::error::${{ matrix.tag-prefix || 'base' }} ships $got, not $want"; exit 1; }
 
-  # ── A tier-1 image no other image needs, in a job of its own ────────
+  # ── Tier-1 images no other image needs, in a job of their own ──────
   # As in publish.yml: derived-images needs base-images, so a leg there that
   # fails (this one fetches from snapshot.ubuntu.com and go.dev) would skip
   # every derived build on a PR that has nothing to do with it.
@@ -300,6 +294,9 @@ jobs:
             go: true
           - context: ./keploy-ci-woodpecker-agent
             tag-prefix: 'woodpecker-agent-'
+            arch: amd64
+          - context: ./keploy-ci-scripts
+            tag-prefix: 'scripts-'
             arch: amd64
 
     steps:
