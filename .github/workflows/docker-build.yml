@@ -96,7 +96,7 @@ jobs:
       - name: Every baked s3.sh is the shared copy
         run: |
           set -eu
-          want=40da95b471bb8e77f7851b2a32b04317b3743f3a289b730b10caf01145e8fbac
+          want=c057c18879117794e95bc3c98b0555fcbbcee808546fd7f2cbbb21e192722b07
           status=0
           n=0
           for f in $(git ls-files '*/s3.sh'); do
