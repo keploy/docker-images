@@ -39,12 +39,12 @@ ARG MONGO_TOOLS_VERSION=100.10.0
 ARG PLAYWRIGHT_VERSION=1.62.1
 
 # Debian trixie's libnss3-tools (certutil; see its install step below), from
-# the same nss build as the libnss3 the image already has (2:3.110-1+deb13u4
-# on node-1.2.49). When Debian replaces this build (a security update or a
+# the same nss build as the libnss3 the image already has (2:3.110-1+deb13u5
+# as of 2026-11-25). When Debian replaces this build (a security update or a
 # point release), the archive stops serving it and the build fails at that
 # install step, naming the version: set this to what
 # `apt-cache policy libnss3-tools` shows then.
-ARG NSS_TOOLS_VERSION=2:3.110-1+deb13u4
+ARG NSS_TOOLS_VERSION=2:3.110-1+deb13u5
 
 RUN set -eux; \
     # ── Playwright system dependencies (OS packages only).
