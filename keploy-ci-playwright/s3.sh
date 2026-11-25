@@ -236,8 +236,8 @@ s3_stop_parts() {
   # bash 3.2 - which is BOTH /bin/sh and /bin/bash on macOS - fails here with "$!: unbound
   # variable", i.e. the guard against $! being unset is itself what breaks. Read it with -u
   # off instead: empty means no background job has been started yet.
-  set +u; _s3_last=$!; set -u
-  [ -z "$_s3_last" ] || [ "$_s3_last" = "$S3_TRACKED" ] || s3_stop_part "$_s3_last"
+  set +u; _s3_stop_bg=$!; set -u
+  [ -z "$_s3_stop_bg" ] || [ "$_s3_stop_bg" = "$S3_TRACKED" ] || s3_stop_part "$_s3_stop_bg"
   for _s3_p in $S3_PART_PIDS; do s3_stop_part "$_s3_p"; done
   S3_PART_PIDS=
 }

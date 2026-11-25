@@ -96,7 +96,7 @@ jobs:
       - name: Every baked s3.sh is the shared copy
         run: |
           set -eu
-          want=c057c18879117794e95bc3c98b0555fcbbcee808546fd7f2cbbb21e192722b07
+          want=742b9be3ac492a75e27561e966c8ef3c976bfc34f573a8fe4fff91897dabdc50
           status=0
           n=0
           for f in $(git ls-files '*/s3.sh'); do
@@ -453,7 +453,7 @@ jobs:
             fi
           done
           got=$(docker run --rm --entrypoint sha256sum keploy-ci-node:pr-threading-test /usr/local/lib/keploy-ci/s3.sh | cut -d' ' -f1)
-          [ "$got" = c057c18879117794e95bc3c98b0555fcbbcee808546fd7f2cbbb21e192722b07 ] \
+          [ "$got" = 742b9be3ac492a75e27561e966c8ef3c976bfc34f573a8fe4fff91897dabdc50 ] \
             || { echo "::error::node's /usr/local/lib/keploy-ci/s3.sh is not the shared copy ($got)"; exit 1; }
 
       # minio-cache and s3.sh inside the image the lanes run, against the CI
