@@ -231,20 +231,59 @@ $1"
 # s3.sh hands it that shell's own background jobs, which are not s3.sh's.
 S3_PART_PIDS=
 S3_TRACKED=
+# /proc is Linux-only, and every lookup below used it unconditionally. On macOS
+# -- a confirmed runtime for this script, where /bin/sh and /bin/bash are both
+# bash 3.2 -- each read failed silently and, because s3_stop_part's guard reads
+# "cannot see a parent" as "not my child", NOTHING was signalled: a cancelled
+# or timed-out run left its curl | dd ranges and stream hashers running. Probe
+# once and keep the /proc path for Linux (procps, and pgrep with it, is not in
+# every lane image, but /proc always is); fall back to ps, which BSD and macOS
+# have, everywhere else. The probe reads /proc/PID/stat rather than testing
+# the directory: FreeBSD/NetBSD procfs and Solaris give a /proc/PID directory
+# with no stat file and a status that is not PPid:-keyed, which would select
+# the Linux branch and silently restore the no-kill this exists to fix.
+S3_HAS_PROC=0
+[ -r "/proc/$$/stat" ] && S3_HAS_PROC=1
 s3_track() { S3_PART_PIDS="$S3_PART_PIDS $1"; S3_TRACKED=$1; }
-# State and start time ("STATE STARTTIME") of a live (non-zombie) pid from
-# /proc/PID/stat, handling spaces, ")" and newlines in comm; empty once gone
-# or a zombie.
+# State and start time ("STATE STARTTIME") of a live (non-zombie) pid: from
+# /proc/PID/stat on Linux, handling spaces, ")" and newlines in comm, and from
+# ps elsewhere. Empty once the pid is gone or a zombie.
 s3_proc_info() {
   (
-    _s3_ps=$(cat "/proc/$1/stat" 2>/dev/null) || exit 0
-    case "$_s3_ps" in *") "*) _s3_ps=${_s3_ps##*) } ;; *) exit 0 ;; esac
-    unset IFS
-    set -f
-    # shellcheck disable=SC2086 # word-splitting the numeric fields after ") "
-    set -- $_s3_ps
-    [ "${1:-}" != Z ] && [ "${1:-}" != X ] || exit 0
-    printf '%s %s\n' "${1:-}" "${20:-}"
+    if [ "$S3_HAS_PROC" = 1 ]; then
+      _s3_ps=$(cat "/proc/$1/stat" 2>/dev/null) || exit 0
+      case "$_s3_ps" in *") "*) _s3_ps=${_s3_ps##*) } ;; *) exit 0 ;; esac
+      unset IFS
+      set -f
+      # shellcheck disable=SC2086 # word-splitting the numeric fields after ") "
+      set -- $_s3_ps
+      [ "${1:-}" != Z ] && [ "${1:-}" != X ] || exit 0
+      printf '%s %s\n' "${1:-}" "${20:-}"
+    else
+      # BSD/macOS ps. The WHOLE state field comes off first, then its first
+      # letter is the state: stripping only that letter would leave BSD's
+      # alphanumeric flags (A E L N S s V W X) glued to the front of the
+      # token, and tr keeps them. A session leader reads "Ss" and a process on
+      # its way out reads "RE", so the token would change under a process
+      # whose start time never did -- and s3_kill_tree's loops compare exactly
+      # that token to decide a pid is still the same process. "E" is set while
+      # a process exits, which is when those loops poll.
+      # lstart is the start time, which is what makes pid reuse detectable; it
+      # is flattened to alphanumerics so it is one opaque word like the /proc
+      # path's integer, with no space (callers split on the single space) and
+      # no ':' for a caller that splits on that. It is 1-second granular where
+      # /proc's starttime is clock ticks, so identity is weaker here --
+      # acceptable because the guard that matters, s3_stop_part's ppid == $$,
+      # is exact.
+      _s3_ps=$(LC_ALL=C ps -o state=,lstart= -p "$1" 2>/dev/null) || exit 0
+      [ -n "$_s3_ps" ] || exit 0
+      _s3_fld=${_s3_ps%%[ 	]*}
+      _s3_st=${_s3_fld%"${_s3_fld#?}"}
+      [ "$_s3_st" != Z ] || exit 0
+      _s3_lt=$(printf '%s' "${_s3_ps#"$_s3_fld"}" | tr -cd '[:alnum:]')
+      [ -n "$_s3_lt" ] || exit 0
+      printf '%s %s\n' "$_s3_st" "$_s3_lt"
+    fi
   )
 }
 s3_proc_id() {
@@ -281,16 +320,31 @@ s3_kill_tree() {
     done
   fi
 }
-# s3_children PID: the pids whose parent is PID, from /proc, which every Linux
-# has (procps, and pgrep with it, is not in every image). Each process's
+# s3_children PID: the pids whose parent is PID. On Linux from /proc, which
+# every Linux has (procps, and pgrep with it, is not in every image); from ps
+# elsewhere. In the /proc branch, each process's
 # status file has its parent on a "PPid:" line; its name, which the process
 # sets, is on a line of its own with any newline in it escaped, so no name can
 # forge another line. grep -l reads every file and prints the names of those
 # that match, going on past one whose process was reaped while it ran (GNU sed
 # and BusyBox awk stop at the first file they cannot read).
 s3_children() {
-  LC_ALL=C grep -l "^PPid:[[:space:]]*$1\$" /proc/[0-9]*/status 2>/dev/null \
-    | sed -n 's|^/proc/\([0-9][0-9]*\)/status$|\1|p'
+  if [ "$S3_HAS_PROC" = 1 ]; then
+    LC_ALL=C grep -l "^PPid:[[:space:]]*$1\$" /proc/[0-9]*/status 2>/dev/null \
+      | sed -n 's|^/proc/\([0-9][0-9]*\)/status$|\1|p'
+  else
+    # One ps for the whole table: asking per-pid would race a forking worker.
+    LC_ALL=C ps -A -o pid=,ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'
+  fi
+}
+# Parent pid of $1, empty when it is gone. Used to tell this shell's own
+# children from a pid the kernel has since handed to someone else.
+s3_parent_of() {
+  if [ "$S3_HAS_PROC" = 1 ]; then
+    LC_ALL=C sed -n 's/^PPid:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "/proc/$1/status" 2>/dev/null
+  else
+    LC_ALL=C ps -o ppid= -p "$1" 2>/dev/null | tr -d '[:space:]'
+  fi
 }
 s3_stop_parts() {
   # A signal between a part's `&` and its s3_track finds the part in $!: the
@@ -308,10 +362,9 @@ s3_stop_parts() {
 # already, and its pid given to another process since: only a process that is
 # still this shell's child is signalled.
 s3_stop_part() {
-  ! grep -q "^PPid:[[:space:]]*$$\$" "/proc/$1/status" 2>/dev/null || {
-    s3_kill_tree "$1"
-    wait "$1" 2>/dev/null || true
-  }
+  [ "$(s3_parent_of "$1")" = "$$" ] || return 0
+  s3_kill_tree "$1"
+  wait "$1" 2>/dev/null || true
 }
 s3_forget_pid() { # $1 = a pid that has been waited for: never signal it again
   _s3_l=; for _s3_p in $S3_PART_PIDS; do [ "$_s3_p" = "$1" ] || _s3_l="$_s3_l $_s3_p"; done
