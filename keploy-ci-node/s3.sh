@@ -40,16 +40,24 @@
 #
 # What every transfer guarantees, so a lane gets either the complete verified
 # bytes or a loud failure:
-#   put   Up to S3_MAX_PUT_BYTES (5 GiB, S3's single-PUT limit) one PUT; above
-#         it a multipart upload. Either way the object appears whole or not at
-#         all, every request carries Content-MD5 (the store rejects bytes that
-#         changed on the way, 400 BadDigest), and the whole file's MD5 travels
-#         as x-amz-meta-s3sh-md5. A single PUT's ETag and a HEAD afterwards
-#         (size, ETag, that MD5) must match the file. A multipart upload checks
-#         each part's ETag, hashes the bytes it actually sent against the MD5
-#         it declared (a file that changed mid-upload is re-sent), and checks
-#         the completed object's ETag (MD5 of the part MD5s, "-<parts>") and a
-#         HEAD. A failed multipart upload is aborted.
+#   put   Up to S3_MAX_PUT_BYTES (5 GiB by default, S3's single-PUT maximum)
+#         one PUT; above it a multipart upload (32 MiB parts by default).
+#         Single PUT is kept as the default below 5 GiB on purpose: Woodpecker
+#         SIGKILLs cancelled/timed-out steps before s3_mp_abort's EXIT trap can
+#         run, so defaulting to multipart for normal caches leaks `.uploads/`
+#         parts in SeaweedFS unless periodic `s3.clean.uploads` is scheduled on
+#         the store; single PUT also keeps all CI identities (including
+#         keploy-release) on the proven single-PUT permission set while
+#         S3_RETRIES=12 rides out transient store 500 outages. Either way the
+#         object appears whole or not at all, every request carries Content-MD5
+#         (the store rejects bytes that changed on the way, 400 BadDigest), and
+#         the whole file's MD5 travels as x-amz-meta-s3sh-md5. A single PUT's
+#         ETag and a HEAD afterwards (size, ETag, that MD5) must match the
+#         file. A multipart upload checks each part's ETag, hashes the bytes it
+#         actually sent against the MD5 it declared (a file that changed
+#         mid-upload is re-sent), and checks the completed object's ETag (MD5
+#         of the part MD5s, "-<parts>") and a HEAD. A failed multipart upload
+#         is aborted.
 #   get   Written to a temp file beside FILE, then renamed over it, so FILE is
 #         never partial and an old FILE survives a failed download. Before the
 #         rename the byte count must equal Content-Length, and the MD5 must
@@ -115,15 +123,17 @@
 #                      elsewhere -- mc's and minio-go's default
 #   S3_TLS_INSECURE    true/1/yes/on: do not verify the endpoint's certificate
 #   S3_CA_FILE         a PEM bundle to verify the endpoint's certificate with
-#   S3_RETRIES         attempts per request (5)
+#   S3_RETRIES         attempts per request (12; ~5 min jittered budget)
 #   S3_RETRY_DELAY     first backoff in seconds, doubled per retry, capped at
-#                      S3_RETRY_MAX_DELAY (2, 30)
+#                      S3_RETRY_MAX_DELAY with equal jitter [d/2, d] (2, 60)
 #   S3_CONNECT_TIMEOUT seconds (10)
 #   S3_LOW_SPEED_LIMIT / S3_LOW_SPEED_TIME   stall detection (32 KiB/s, 60 s)
 #   S3_MAX_TIME        per-attempt ceiling in seconds, 0 = none (3600)
 #   S3_OP_TIMEOUT      seconds the command may go without progress, 0 = none (0)
-#   S3_MAX_PUT_BYTES   largest single PUT (5 GiB); larger goes multipart
-#   S3_PUT_PART_BYTES  multipart part size (256 MiB, whole MiB, raised to keep
+#   S3_MAX_PUT_BYTES   largest single PUT (5 GiB, S3's maximum); larger goes
+#                      multipart (see put note above on why single PUT is the
+#                      default below 5 GiB)
+#   S3_PUT_PART_BYTES  multipart part size (32 MiB, whole MiB, raised to keep
 #                      within 10000 parts); one part at a time is on disk
 #   S3_LS_PAGE         keys per ListObjectsV2 page (the store's default, 1000)
 #   S3_PARALLEL        byte ranges fetched at once by get and cat (4; 1 = one
@@ -143,16 +153,16 @@ S3_REGION="${S3_REGION:-us-east-1}"
 S3_ADDRESSING="${S3_ADDRESSING:-path}"
 S3_TLS_INSECURE="${S3_TLS_INSECURE:-}"
 S3_CA_FILE="${S3_CA_FILE:-}"
-S3_RETRIES="${S3_RETRIES:-5}"
+S3_RETRIES="${S3_RETRIES:-12}"
 S3_RETRY_DELAY="${S3_RETRY_DELAY:-2}"
-S3_RETRY_MAX_DELAY="${S3_RETRY_MAX_DELAY:-30}"
+S3_RETRY_MAX_DELAY="${S3_RETRY_MAX_DELAY:-60}"
 S3_CONNECT_TIMEOUT="${S3_CONNECT_TIMEOUT:-10}"
 S3_LOW_SPEED_LIMIT="${S3_LOW_SPEED_LIMIT:-32768}"
 S3_LOW_SPEED_TIME="${S3_LOW_SPEED_TIME:-60}"
 S3_MAX_TIME="${S3_MAX_TIME:-3600}"
 S3_OP_TIMEOUT="${S3_OP_TIMEOUT:-0}"
 S3_MAX_PUT_BYTES="${S3_MAX_PUT_BYTES:-5368709120}"
-S3_PUT_PART_BYTES="${S3_PUT_PART_BYTES:-268435456}"
+S3_PUT_PART_BYTES="${S3_PUT_PART_BYTES:-33554432}"
 S3_PARALLEL="${S3_PARALLEL:-4}"
 S3_PARALLEL_MIN_BYTES="${S3_PARALLEL_MIN_BYTES:-33554432}"
 S3_PART_BYTES="${S3_PART_BYTES:-33554432}"
@@ -715,19 +725,24 @@ s3_error_code() { # S3 <Code> from an error body (only its head: never scan a pa
   head -c 65536 "$1" | tr -d '\r\n' | sed -n 's:.*<Code>\([^<]*\)</Code>.*:\1:p' | head -n 1
 }
 
+s3_error_msg() { # S3 <Message> from an error body (single line, bounded)
+  [ -s "$1" ] || return 0
+  head -c 65536 "$1" | tr -d '\r\n' | sed -n 's:.*<Message>\([^<]*\)</Message>.*:\1:p' | head -n 1 | cut -c1-200
+}
+
 # Sets S3_CLASS to ok | notfound | auth | transient | fatal, and S3_WHY.
 s3_classify() { # $1 = curl rc, $2 = http status, $3 = body file
-  _s3_code=
-  case "$1:$2" in 0:2??) ;; *) _s3_code=$(s3_error_code "$3") ;; esac
+  _s3_code=; _s3_msg=
+  case "$1:$2" in 0:2??) ;; *) _s3_code=$(s3_error_code "$3"); _s3_msg=$(s3_error_msg "$3") ;; esac
   if [ "$1" -ne 0 ]; then
-    S3_WHY="curl exit $1${_s3_code:+ ($_s3_code)}"
+    S3_WHY="curl exit $1${_s3_code:+ ($_s3_code)}${_s3_msg:+: $_s3_msg}"
     case "$1" in
       5|6|7|16|18|28|35|52|55|56|92) S3_CLASS=transient ;;
       *) S3_CLASS=fatal ;;
     esac
     return 0
   fi
-  S3_WHY="HTTP $2${_s3_code:+ $_s3_code}"
+  S3_WHY="HTTP $2${_s3_code:+ $_s3_code}${_s3_msg:+: $_s3_msg}"
   case "$2" in
     2??) S3_CLASS=ok ;;
     404) S3_CLASS=notfound ;;
@@ -748,12 +763,19 @@ s3_class_rc() {
   esac
 }
 
-s3_backoff() { # $1 = attempt that just failed (1-based)
+s3_backoff() { # $1 = attempt that just failed (1-based); equal jitter in [ceil(d/2), d]
   _s3_d=$S3_RETRY_DELAY; _s3_i=1
   while [ "$_s3_i" -lt "$1" ]; do
     _s3_d=$(( _s3_d * 2 )); _s3_i=$(( _s3_i + 1 ))
     [ "$_s3_d" -lt "$S3_RETRY_MAX_DELAY" ] || { _s3_d=$S3_RETRY_MAX_DELAY; break; }
   done
+  if [ "$_s3_d" -gt 1 ]; then
+    _s3_lo=$(( (_s3_d + 1) / 2 ))
+    _s3_span=$(( _s3_d - _s3_lo + 1 ))
+    _s3_r=$(od -An -tu2 -N2 /dev/urandom 2>/dev/null | tr -d ' \n')
+    case "$_s3_r" in ''|*[!0-9]*) _s3_r=$(( $$ + $1 * 31 )) ;; esac
+    _s3_d=$(( _s3_lo + (_s3_r % _s3_span) ))
+  fi
   printf '%s\n' "$_s3_d"
 }
 
