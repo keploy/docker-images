@@ -29,6 +29,9 @@ FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d744
 # and the GL/X11 headers) and linking it, and by resolving the GL/X11 pkg-config
 # modules, so a renamed package or a broken toolchain fails here, not in a lint
 # lane.
+# zstd: keploy/enterprise's lint lanes restore the shared Go module cache
+# (go-mod-cache.sh, .tar.zst) in this image; without it every .tar.zst key is
+# skipped and the lane falls back to the frozen legacy .tar.gz.
 RUN set -eux; \
     case "$(dpkg --print-architecture)" in \
         amd64) cross="gcc-aarch64-linux-gnu libc6-dev-arm64-cross"; cc=aarch64-linux-gnu-gcc ;; \
@@ -38,6 +41,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         jq \
+        zstd \
         libgl1-mesa-dev \
         libx11-dev \
         libxcursor-dev \
@@ -50,7 +54,8 @@ RUN set -eux; \
     printf '#include <stdlib.h>\n#include <string.h>\n#include <GL/gl.h>\n#include <X11/Xlib.h>\nint main(void) { return 0; }\n' \
         | "$cc" -x c - -o /tmp/cross-probe; \
     rm -f /tmp/cross-probe; \
-    pkg-config --exists gl x11 xcursor xi xinerama xrandr xxf86vm
+    pkg-config --exists gl x11 xcursor xi xinerama xrandr xxf86vm; \
+    zstd --version
 
 # v2.15.0, built with go1.27.0 and golang.org/x/tools v0.52.0, reads this
 # image's go1.27.3 export data (the probe at the end of the next step lints a

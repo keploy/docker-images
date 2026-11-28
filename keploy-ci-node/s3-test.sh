@@ -1302,6 +1302,45 @@ plan "0 200 - etag=$OPAQUE hdr=x-amz-server-side-encryption-customer-algorithm:A
 s3 put "$T/obj" woodpecker/a/obj; rc=$?
 [ "$rc" -eq 0 ] && pass "put: under SSE-C likewise" || fail "put sse-c: rc=$rc err=$(cat "$T/err")"
 
+# ---- default single-PUT threshold (5 GiB), retry budget (~5 min jittered), and per-attempt error logging
+got=$(
+  S3_SH_SOURCE_ONLY=1; export S3_SH_SOURCE_ONLY
+  # shellcheck source=/dev/null
+  . "$S3SH"
+  printf '%s %s %s %s %s\n' "$S3_MAX_PUT_BYTES" "$S3_PUT_PART_BYTES" "$S3_RETRIES" "$S3_RETRY_DELAY" "$S3_RETRY_MAX_DELAY"
+)
+[ "$got" = "5368709120 33554432 12 2 60" ] \
+  && pass "defaults: 5 GiB single-PUT threshold, 32 MiB parts, 12 retries capped at 60s (~5 min jittered budget)" \
+  || fail "defaults: got '$got'"
+got=$(
+  S3_SH_SOURCE_ONLY=1; export S3_SH_SOURCE_ONLY
+  # shellcheck source=/dev/null
+  . "$S3SH"
+  set +e
+  tot=0; bad=0; i=1
+  while [ "$i" -lt "$S3_RETRIES" ]; do
+    w=$(s3_backoff "$i")
+    # Unjittered cap for attempt i: min(2^(i), 60), equal jitter in [ceil(d/2), d]
+    d=2; k=1; while [ "$k" -lt "$i" ]; do d=$((d * 2)); [ "$d" -lt 60 ] || { d=60; break; }; k=$((k + 1)); done
+    lo=$(((d + 1) / 2))
+    if [ "$w" -lt "$lo" ] || [ "$w" -gt "$d" ]; then bad=$((bad + 1)); fi
+    tot=$((tot + w))
+    i=$((i + 1))
+  done
+  printf '%s %s\n' "$bad" "$tot"
+)
+bad_j=${got%% *}; tot_j=${got#* }
+[ "$bad_j" -eq 0 ] && [ "$tot_j" -ge 211 ] && [ "$tot_j" -le 422 ] \
+  && pass "s3_backoff: equal jitter stays in [ceil(d/2), d] with total budget ${tot_j}s in [211, 422]s" \
+  || fail "s3_backoff jitter: bad=$bad_j tot=$tot_j"
+printf '<Error><Code>InternalError</Code><Message>no free volumes</Message></Error>' > "$T/full.xml"
+plan "0 500 $T/full.xml" "0 500 $T/full.xml" "0 200 - etag=$OBJMD5" "0 200 $T/obj etag=$OBJMD5"
+RETRIES=4 s3 put "$T/obj" woodpecker/a/obj; rc=$?
+[ "$rc" -eq 0 ] && grep -q 'attempt 1/4 failed (HTTP 500 InternalError: no free volumes)' "$T/err" \
+  && grep -q 'attempt 2/4 failed (HTTP 500 InternalError: no free volumes)' "$T/err" \
+  && pass "put: each retry attempt logs HTTP status, S3 Code and S3 Message" \
+  || fail "put per-attempt error msg: rc=$rc err=$(cat "$T/err")"
+
 # ---- put, multipart: over S3_MAX_PUT_BYTES (1 MiB here, 5 GiB by default)
 head -c 2621447 /dev/urandom > "$T/mpf"          # 2.5 MiB + 7: parts of 1, 1 and 0.5 MiB
 MPMD5=$(md5sum < "$T/mpf" | cut -d' ' -f1)
@@ -1630,16 +1669,17 @@ opt() { # opt VAR=VALUE... VERB ARGS...: s3.sh on the fake clock, stub curl
   # shellcheck disable=SC2086 # one word per VAR=VALUE, none with a space
   FAKE_CLOCK=$T/clock PATH="$BIN:$PATH" MINIO_ENDPOINT=http://store.test:9001 MINIO_ACCESS_KEY=ak MINIO_SECRET_KEY=x \
     env $_opt_env timeout -k 10 "$S3T_LIMIT" "$S3RUN" "$S3SH" "$@"; }
-# A store that answers nothing but 503, doubling backoff from 1 s: calls at
-# 1000 and 1001; the next would start at 1003, the deadline: exit 5, saying
-# so, long before S3_RETRIES runs out. The connect timeout is cut to what is
-# left (3, then 2), a time the store has not answered in; nothing that bounds
-# a transfer is: the stall window stays S3_LOW_SPEED_TIME and --max-time
-# S3_MAX_TIME, so a transfer that moves is never cut.
+# A store that answers nothing but 503, doubling backoff with equal jitter
+# from 1 s: call 1 at 1000 (backoff 1 s, deterministic), call 2 at 1001; the
+# next backoff is in [1, 2] s so it would start at >= 1002, the deadline:
+# exit 5, saying so, long before S3_RETRIES runs out. The connect timeout is
+# cut to what is left (2, then 1), a time the store has not answered in;
+# nothing that bounds a transfer is: the stall window stays S3_LOW_SPEED_TIME
+# and --max-time S3_MAX_TIME, so a transfer that moves is never cut.
 clk; plan "0 503 -"
-opt S3_RETRIES=10 S3_RETRY_DELAY=1 S3_OP_TIMEOUT=3 stat woodpecker/a/b > /dev/null 2> "$T/err"; rc=$?
-[ "$rc" -eq 5 ] && [ "$(ncalls)" -eq 2 ] && grep -q 'S3_OP_TIMEOUT=3s reached without progress' "$T/err" \
-  && sed -n 1p "$ST/argv.log" | grep -q -- '--connect-timeout 3 ' && sed -n 2p "$ST/argv.log" | grep -q -- '--connect-timeout 2 ' \
+opt S3_RETRIES=10 S3_RETRY_DELAY=1 S3_OP_TIMEOUT=2 stat woodpecker/a/b > /dev/null 2> "$T/err"; rc=$?
+[ "$rc" -eq 5 ] && [ "$(ncalls)" -eq 2 ] && grep -q 'S3_OP_TIMEOUT=2s reached without progress' "$T/err" \
+  && sed -n 1p "$ST/argv.log" | grep -q -- '--connect-timeout 2 ' && sed -n 2p "$ST/argv.log" | grep -q -- '--connect-timeout 1 ' \
   && sed -n 2p "$ST/argv.log" | grep -q -- '--speed-time 60 ' && sed -n 2p "$ST/argv.log" | grep -q -- '--max-time 3600 ' \
   && pass "S3_OP_TIMEOUT: 503s stop at the deadline after exactly 2 calls (exit 5); the connect timeout is cut to what is left, never the stall window or the transfer" \
   || fail "op timeout: rc=$rc calls=$(ncalls) err=$(cat "$T/err") argv=$(cat "$ST/argv.log")"
